@@ -1,4 +1,5 @@
 use std::{
+    fs::read_to_string,
     ops::Not,
     path::{Path, PathBuf},
 };
@@ -6,6 +7,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
+use regex::Regex;
 
 /// A CLI tool for performing various operations.
 #[derive(Parser)]
@@ -89,7 +91,14 @@ fn handle_scan(
     include_dotfiles: IncludeDotfilesFlag,
 ) -> Result<()> {
     let path: PathBuf = path_str.into();
-    scan_path(&path, follow_symlinks, include_dotfiles, 0)
+    let parent_prefix_len = path.display().to_string().len();
+    scan_path(
+        &path,
+        follow_symlinks,
+        include_dotfiles,
+        0,
+        parent_prefix_len,
+    )
 }
 
 /// Scan a path. If it's a directory, descend. If it's a file,
@@ -102,16 +111,11 @@ fn scan_path(
     follow_symlinks: FollowSymlinksFlag,
     include_dotfiles: IncludeDotfilesFlag,
     parent_scan_depth: usize,
+    parent_prefix_len: usize,
 ) -> Result<()> {
-    println!(
-        "Scanning depth:{} path:{}…",
-        parent_scan_depth + 1,
-        path.display()
-    );
-
     if !follow_symlinks {
         if path.is_symlink() {
-            println!("Not following symlink: {}.", path.display());
+            println!("Ignoring symlink: {}.", path.display());
             return Ok(());
         }
     }
@@ -121,13 +125,13 @@ fn scan_path(
             .file_name()
             .is_some_and(|n| n.len() > 1 && n.to_string_lossy().starts_with("."))
         {
-            println!("Excluding dotfile: {}.", path.display());
+            println!("Ignoring dotfile: {}.", path.display());
             return Ok(());
         }
     }
 
     if path.is_file() {
-        return scan_file(path);
+        return scan_file(path, parent_prefix_len);
     }
 
     if path.is_dir() {
@@ -142,6 +146,7 @@ fn scan_path(
                         follow_symlinks,
                         include_dotfiles,
                         parent_scan_depth + 1,
+                        parent_prefix_len,
                     );
                 }
             }
@@ -151,7 +156,18 @@ fn scan_path(
     Ok(())
 }
 
-fn scan_file(path: &Path) -> Result<()> {
-    println!("Would scan: {}", path.display());
+fn scan_file(path: &Path, prefix_len: usize) -> Result<()> {
+    let body = read_to_string(path)?;
+    let mut distinct_path_part = path.display().to_string();
+    distinct_path_part.replace_range(..prefix_len + 1, "");
+    for m in scan_text(&body)?.iter() {
+        println!("{}: {}", distinct_path_part, m);
+    }
     Ok(())
+}
+
+fn scan_text(text: &str) -> Result<Vec<String>> {
+    let re = Regex::new(r"\#fg::kw::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
+    let matches: Vec<_> = re.find_iter(text).map(|m| m.as_str().to_owned()).collect();
+    Ok(matches)
 }
