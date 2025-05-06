@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, hash_map::Keys},
     fs::read_to_string,
-    ops::{Not, Range},
+    ops::{Add, Not, Range},
     path::{Path, PathBuf},
 };
 
@@ -93,13 +93,15 @@ fn handle_scan(
 ) -> Result<()> {
     let path: PathBuf = path_str.into();
     let parent_prefix_len = path.display().to_string().len();
-    scan_path(
+    let index = scan_path(
         &path,
         follow_symlinks,
         include_dotfiles,
         parent_prefix_len,
         0,
-    )
+    )?;
+    print!("{}", index);
+    Ok(())
 }
 
 /// Scan a path. If it's a directory, descend. If it's a file,
@@ -113,10 +115,12 @@ fn scan_path(
     include_dotfiles: IncludeDotfilesFlag,
     parent_prefix_len: usize,
     _parent_scan_depth: usize,
-) -> Result<()> {
+) -> Result<TagIndex> {
+    let mut my_tag_index = TagIndex::new(path);
+
     if !follow_symlinks && path.is_symlink() {
         // println!("Ignoring symlink: {}.", path.display());
-        return Ok(());
+        return Ok(my_tag_index);
     }
 
     if !include_dotfiles
@@ -125,13 +129,13 @@ fn scan_path(
             .is_some_and(|n| n.len() > 1 && n.to_string_lossy().starts_with("."))
     {
         // println!("Ignoring dotfile: {}.", path.display());
-        return Ok(());
+        return Ok(my_tag_index);
     }
 
     // Check that we're markdown files.
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-        let _ = scan_file(path, parent_prefix_len);
-        return Ok(());
+        my_tag_index.add_path_hits(scan_file(path, parent_prefix_len)?);
+        return Ok(my_tag_index);
     }
 
     if path.is_dir() {
@@ -141,19 +145,91 @@ fn scan_path(
                     println!("Error reading {:#?}", e);
                 }
                 Ok(d) => {
-                    let _ = scan_path(
-                        &d.path(),
-                        follow_symlinks,
-                        include_dotfiles,
-                        parent_prefix_len,
-                        _parent_scan_depth + 1,
-                    );
+                    my_tag_index = my_tag_index
+                        + scan_path(
+                            &d.path(),
+                            follow_symlinks,
+                            include_dotfiles,
+                            parent_prefix_len,
+                            _parent_scan_depth + 1,
+                        )?;
                 }
             }
         }
     }
 
-    Ok(())
+    Ok(my_tag_index)
+}
+
+#[derive(Debug, Clone, Default)]
+struct TagIndex {
+    // Toplevel path
+    full_path: PathBuf,
+
+    // Map of tags to vecs of subpaths to files.
+    tags_to_paths: HashMap<String, Vec<(String, Range<usize>)>>,
+}
+
+impl std::fmt::Display for TagIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}:", self.full_path.display())?;
+        for tag in self.tags_to_paths.keys() {
+            writeln!(f, "  🏷️  {}", tag)?;
+            for loc in self
+                .tags_to_paths
+                .get(tag)
+                .unwrap_or_else(|| panic!("Unable to look up tag {}, which we just pulled.", &tag))
+                .iter()
+            {
+                writeln!(f, "     |__ 📄 {}:{}..{}", loc.0, loc.1.start, loc.1.end)?;
+            }
+        }
+        write!(f, "")
+    }
+}
+
+/// This inverts a collection of PathHits, turning it into a map
+/// of Tag -> Vec<Filename, Range>, providing a file and location in
+/// the file for each instance of the tag found.
+///
+impl TagIndex {
+    fn new(full_path: &Path) -> Self {
+        Self {
+            full_path: full_path.to_path_buf(),
+            tags_to_paths: HashMap::default(),
+        }
+    }
+
+    /// Merge the given ``PathHits`` instance intos the index.
+    fn add_path_hits(&mut self, path_hits: Option<PathHits>) {
+        // gnarly
+        if let Some(path_hits) = path_hits {
+            let subpath = &path_hits.distinct_path_part;
+            for tag in path_hits.hits.tag_iter() {
+                let tag_vec = self.tags_to_paths.entry(tag.clone()).or_default();
+                if let Some(range_vec) = path_hits.hits.hits_iter_for_tag(tag) {
+                    let mut append_vec: Vec<_> = range_vec
+                        .iter()
+                        .map(|r| (subpath.clone(), r.clone()))
+                        .collect();
+                    tag_vec.append(&mut append_vec);
+                }
+            }
+        }
+    }
+}
+
+impl Add for TagIndex {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        TagIndex {
+            full_path: self.full_path,
+            tags_to_paths: HashMap::from_iter(
+                self.tags_to_paths.into_iter().chain(rhs.tags_to_paths),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,11 +253,11 @@ impl PathHits {
 impl std::fmt::Display for PathHits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{}:", self.distinct_path_part)?;
-        for tag in self.hits.hit_keys_iter() {
+        for tag in self.hits.tag_iter() {
             writeln!(f, "    tag: {}", tag)?;
             for range in self
                 .hits
-                .iter_key(tag)
+                .hits_iter_for_tag(tag)
                 .expect("We just pulled the tag, but it's not there now!")
             {
                 writeln!(f, "    |___ {:#?}", range)?;
@@ -198,7 +274,7 @@ fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<PathHits>> {
 
     Ok(
         if let Some(hits) = PathHits::try_new(path, &distinct_path_part, scan_text(&body)) {
-            print!("{}", hits);
+            // print!("{}", hits);
             Some(hits)
         } else {
             None
@@ -242,11 +318,11 @@ impl Hits {
         hitvec.push(range);
     }
 
-    fn hit_keys_iter(&self) -> Keys<String, Vec<Range<usize>>> {
+    fn tag_iter(&self) -> Keys<String, Vec<Range<usize>>> {
         self.hits.keys()
     }
 
-    fn iter_key(&self, key: &str) -> Option<&Vec<Range<usize>>> {
+    fn hits_iter_for_tag(&self, key: &str) -> Option<&Vec<Range<usize>>> {
         self.hits.get(key)
     }
 }
