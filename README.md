@@ -1,62 +1,36 @@
 # etiquetas: tag wrangler
 
-- Scans directory hierarchies
-- Finds text files with tags matchin patterns
-- Suggests tag clusters based upon stem/semantic similarity
-- Outputs an index
-- allows the user to merge/combine/group tags, and rewrite them in documents.
+This repo contains tools (well, "tool") related to large-scale tag management for arbitrary 
+hierarchies of markdown files. It's opinionated, and rather tailored to my workflow. It doesn't
+assume a blogging or template system, or anything like that. It's really just about the files,
+their content, and managing tagging.
 
-## Tag Patterns
+I use this to accompany [Notebooks](https://www.notebooksapp.com), which is my primary non-IDE writing environment.
+
+## What it does now
+
+- Recursively scans a directory of markdown files
+- Looks for tags matching a specific pattern
+- Groups/aggregates tags, and shows file locations (path and range) for each.
+- Displays the whole shebang as a tree.
+
+## What I'm adding
+
+- Automatic scanning based upon fs events
+- Generation of a Markdown index of tags, grouped and cross-referenced and visualized in various ways.
+- A mechanism for managing tags in documents... correcting, coalescing, etc.
+- Embeddings-based semiautomatic tag coalescing, tag suggestions, etc.
+
+## How I work with tags curently
 
 Each tag pattern has:
 - Sigil (e.g. `#`, `@`, etc)
-- Body (e.g. `tag-name`, `prj:tag-name`, `prj/type/tag-name`)
-- Tag formats match tag bodies to expressions for semantic parsing:
-  - `(\#)([^\s,\/])` : Basic tag match (e.g. `#tag1, #tag2,`)
-  - `(\#)([^\s,\/])` : Basic tag match (e.g. `#tag1, #tag2,`)
-  
-## Tag BNF
-  ```
-  TAG   := (SIGIL)(BODY)
-  SIGIL := [@#&%!]                        # Configurable
-  BODY  := (ATOM) | (ATOM)(SEP)(BODY) 
-  SEP   := '/'
-  ATOM  := [^\s$(SEP)]*
-  ```
-  
+- Body `prj::type::tag-name`
+
 ## Example Tags
 
 - `#fg::kw::convergence` : Keyword specific to project "fg", with body "convergence"
-- `#monkeys` " Generic keyword, "monkeys"
 
-## Scanning
-
-The tool runs in the background, watching a directory for changes. When
-a change event is intercepted related to a file that matches a predicate,
-an internal event is fired to scan the file for tags.
-
-If tags are found, then they are matched against the configured watched tags.
-This fires an "interest" event.
-
-"interest" events are consumed by a state manager. The state manager keeps an internal directory of tag state information; "interest" events are examined and applied as diffs as appropriate. When a diff is applied, then an "update" event is fired.
-
-"update" events are consumed by the updater, which maintains the external index file, and optionally applies changes to the contents of the files.
-
-## Challenges
-
-### Race Conditions
-
-Race conditions. This is the big one, if we're going to rewrite tags in the
-content of documents. There is no reliable file locking mechanism that does not
-involve implementation by all programs subject to file write races, and we don't
-control others' text editors. This would be a nightmare when working with
-aggressive autosave systems.
-
-
-However, we _could_ make organization and indexing automatic, but require
-assisted manual reconciliation of tags... for example, the "index" could be a
-live web page which allows the user to view tag clusters, and present an
-interface for managing them.
 
   
   
