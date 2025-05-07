@@ -1,1 +1,1 @@
-pub use etq;
+pub mod model;
