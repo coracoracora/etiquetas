@@ -8,7 +8,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
-use regex::Regex;
+use regex::{Captures, Regex};
 
 /// tp: A Tag Processor
 #[derive(Parser)]
@@ -100,7 +100,8 @@ fn handle_scan(
         parent_prefix_len,
         0,
     )?;
-    print!("{}", index);
+    let grouping = index.group_keys(r"(\#fg\:\:[^:]+)(::.*\b)", |c| (c[1]).to_string());
+    print!("{}", grouping);
     Ok(())
 }
 
@@ -161,13 +162,41 @@ fn scan_path(
     Ok(my_tag_index)
 }
 
+type TagsToPaths = HashMap<String, Vec<(String, Range<usize>)>>;
+
+#[derive(Debug, Clone)]
+struct TagGroup {
+    capture_pattern: String,
+    groups: HashMap<String, TagsToPaths>,
+}
+
+impl std::fmt::Display for TagGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "capture_pattern: {}", self.capture_pattern)?;
+        for (group_key, group) in self.groups.clone() {
+            writeln!(f, "📦  {}:", group_key)?;
+            for (tag, locs) in group {
+                writeln!(f, "      |__ 🏷️  {}", tag)?;
+                for (loc, range) in locs {
+                    writeln!(
+                        f,
+                        "      |    |__ 📄 {}:{}..{}",
+                        loc, range.start, range.end
+                    )?;
+                }
+            }
+        }
+        write!(f, "")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct TagIndex {
     // Toplevel path
     full_path: PathBuf,
 
     // Map of tags to vecs of subpaths to files.
-    tags_to_paths: HashMap<String, Vec<(String, Range<usize>)>>,
+    tags_to_paths: TagsToPaths,
 }
 
 impl std::fmt::Display for TagIndex {
@@ -197,6 +226,29 @@ impl TagIndex {
         Self {
             full_path: full_path.to_path_buf(),
             tags_to_paths: HashMap::default(),
+        }
+    }
+
+    fn group_keys(
+        &self,
+        capture_pattern: &str,
+        group_key_constructor: impl Fn(&Captures) -> String,
+    ) -> TagGroup {
+        let re = Regex::new(capture_pattern)
+            .unwrap_or_else(|e| panic!("RE compile failed for '{}': {:?}", capture_pattern, e));
+
+        let mut ret = HashMap::default();
+
+        // uglee
+        for (key, value) in self.tags_to_paths.clone() {
+            let group_key = re.replace(&key, &group_key_constructor);
+            let entry: &mut HashMap<_, _> = ret.entry(group_key.into()).or_default();
+            let _ = entry.insert(key, value);
+        }
+
+        TagGroup {
+            capture_pattern: capture_pattern.to_owned(),
+            groups: ret,
         }
     }
 
@@ -271,15 +323,11 @@ fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<PathHits>> {
     let body = read_to_string(path)?;
     let mut distinct_path_part = path.display().to_string();
     distinct_path_part.replace_range(..prefix_len + 1, "");
-
-    Ok(
-        if let Some(hits) = PathHits::try_new(path, &distinct_path_part, scan_text(&body)) {
-            // print!("{}", hits);
-            Some(hits)
-        } else {
-            None
-        },
-    )
+    Ok(PathHits::try_new(
+        path,
+        &distinct_path_part,
+        scan_text(&body),
+    ))
 }
 
 #[derive(Debug, Clone)]
