@@ -76,10 +76,7 @@ fn main() -> Result<()> {
             path,
             include_dotfiles,
             follow_symlinks,
-        } => {
-            println!("Scanning path: {} ", path);
-            handle_scan(path, follow_symlinks.into(), include_dotfiles.into())
-        }
+        } => handle_scan(path, follow_symlinks.into(), include_dotfiles.into()),
     }
 }
 
@@ -100,8 +97,12 @@ fn handle_scan(
         parent_prefix_len,
         0,
     )?;
-    let grouping = index.group_keys(r"(\#fg\:\:[^:]+)(::.*\b)", |c| (c[1]).to_string());
-    print!("{}", grouping);
+    let _grouping = index.group_keys(
+        r"(\#fg\:\:[^:]+)(::.*\b)",
+        |c| (c[1]).to_string(),
+        "A default grouping based upon project::type stemming.",
+    );
+    print!("{}", _grouping);
     Ok(())
 }
 
@@ -117,10 +118,10 @@ fn scan_path(
     parent_prefix_len: usize,
     _parent_scan_depth: usize,
 ) -> Result<TagIndex> {
+    // println!("Scanning path: {} ", path.display());
     let mut my_tag_index = TagIndex::new(path);
 
     if !follow_symlinks && path.is_symlink() {
-        // println!("Ignoring symlink: {}.", path.display());
         return Ok(my_tag_index);
     }
 
@@ -129,13 +130,12 @@ fn scan_path(
             .file_name()
             .is_some_and(|n| n.len() > 1 && n.to_string_lossy().starts_with("."))
     {
-        // println!("Ignoring dotfile: {}.", path.display());
         return Ok(my_tag_index);
     }
 
-    // Check that we're markdown files.
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
         my_tag_index.add_path_hits(scan_file(path, parent_prefix_len)?);
+        // println!("Done with path: {}", path.display());
         return Ok(my_tag_index);
     }
 
@@ -158,31 +158,39 @@ fn scan_path(
             }
         }
     }
+    // println!("Done with path: {}", path.display());
 
     Ok(my_tag_index)
 }
 
 fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<PathHits>> {
+    // println!("Scanning file: {}", path.display());
     let body = read_to_string(path)?;
     let mut distinct_path_part = path.display().to_string();
     distinct_path_part.replace_range(..prefix_len + 1, "");
+    // let ret =
     Ok(PathHits::try_new(
         path,
         &distinct_path_part,
         scan_text(&body),
     ))
+    // ;
+    // println!("Finished scanning file: {}, ret: {:?}", path.display(), ret);
+    // ret
 }
 
 fn scan_text(text: &str) -> Option<Hits> {
+    // println!("Scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
+
     let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
     let mut hitmap = Hits::new(re.to_string()); // this feels hacky
     for hit in re
         .find_iter(text)
         .map(|m| (m.as_str().to_owned(), m.range()))
     {
-        hitmap.add_hit(&hit.0, hit.1)
-        // let hitvec = hitmap.entry(hit.0).or_insert(vec![]);
-        // hitvec.push(hit.1);
+        // println!("Found match: {:?}", hit);
+        hitmap.add_hit(&hit.0, &hit.1.into())
     }
+    // println!("Finished scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
     hitmap.if_nonempty()
 }
