@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
-use etiquetas::etq::model::{Hits, PathHits, TagIndex};
+use etiquetas::etq::model::{FoundTags, FoundTagsAtPath, TagIndex};
 use regex::Regex;
 
 /// tp: A Tag Processor
@@ -163,13 +163,13 @@ fn scan_path(
     Ok(my_tag_index)
 }
 
-fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<PathHits>> {
+fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<FoundTagsAtPath>> {
     // println!("Scanning file: {}", path.display());
     let body = read_to_string(path)?;
     let mut distinct_path_part = path.display().to_string();
     distinct_path_part.replace_range(..prefix_len + 1, "");
     // let ret =
-    Ok(PathHits::try_new(
+    Ok(FoundTagsAtPath::try_new(
         path,
         &distinct_path_part,
         scan_text(&body),
@@ -179,11 +179,11 @@ fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<PathHits>> {
     // ret
 }
 
-fn scan_text(text: &str) -> Option<Hits> {
+fn scan_text(text: &str) -> Option<FoundTags> {
     // println!("Scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
 
     let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
-    let mut hitmap = Hits::new(re.to_string()); // this feels hacky
+    let mut hitmap = FoundTags::new(re.to_string()); // this feels hacky
     for hit in re
         .find_iter(text)
         .map(|m| (m.as_str().to_owned(), m.range()))
