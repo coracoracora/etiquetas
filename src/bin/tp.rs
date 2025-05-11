@@ -189,7 +189,7 @@ fn scan_text(text: &str) -> Option<FoundTags> {
         .map(|m| (m.as_str().to_owned(), m.range()))
     {
         // println!("Found match: {:?}", hit);
-        hitmap.add_hit(&hit.0, &hit.1.into())
+        hitmap.add_hit(hit.0, &hit.1.into())
     }
     // println!("Finished scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
     hitmap.if_nonempty()

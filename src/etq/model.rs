@@ -1,8 +1,11 @@
 use std::{
-    collections::{hash_map::Keys, HashMap}, fmt::Display, ops::{Add, Range}, path::{Path, PathBuf}
+    collections::{HashMap, hash_map::Keys},
+    fmt::Display,
+    ops::{Add, Range},
+    path::{Path, PathBuf},
 };
 
-use derive_more::Display;
+use derive_more::{AsRef, Deref, DerefMut, Display, From, FromStr, Index, IndexMut, IntoIterator};
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
@@ -170,11 +173,10 @@ impl TagsToLocations {
     pub fn len(&self) -> usize {
         self.inner.len()
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
-
 }
 
 /// Encapsulates tag patterns and functions used for re.replace(), for construction
@@ -207,7 +209,7 @@ impl std::fmt::Debug for TagGrouper {
     }
 }
 
-#[derive(Debug, Clone, Display, Serialize, Deserialize, Hash, Eq, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Display, Serialize, Deserialize, Hash, Eq, PartialEq, PartialOrd, From)]
 #[serde(transparent)]
 pub struct TagGroup(Tag);
 impl AsRef<str> for TagGroup {
@@ -215,18 +217,19 @@ impl AsRef<str> for TagGroup {
         self.0.as_ref()
     }
 }
-impl<T> From<T> for TagGroup
-where
-    T: Into<Tag>,
-{
-    fn from(value: T) -> Self {
-        Self(value.into())
+
+impl From<std::borrow::Cow<'_, str>> for TagGroup {
+    
+    fn from(value: std::borrow::Cow<'_, str>) -> Self {
+        let tag_string: String = value.into();
+        Self(tag_string.into())
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, IntoIterator)]
 pub struct TagGroups {
     pub capture_pattern: String,
+    #[into_iterator(owned, ref, ref_mut)]
     pub groups: HashMap<TagGroup, TagsToLocations>,
     pub description: String,
 }
@@ -332,8 +335,10 @@ impl TagIndex {
         // gnarly
         if let Some(path_hits) = path_hits {
             // println!("addin path hits: {}", path_hits);
+            // 
+            let path_part = path_hits.distinct_path_part.to_string();
 
-            for (tag, locations) in &path_hits.hits.tag_locations {
+            for (tag, locations) in path_hits {
                 // println!("adding tag/locs: {}, {:?}", tag, locations);
                 let tag_entry = self.tags_to_locations.entry(tag.clone()).or_default();
                 let locations: TextLocations = locations
@@ -341,7 +346,7 @@ impl TagIndex {
                     .into_iter()
                     .map(|l| {
                         // println!("in map; l: {:?}", l);
-                        TextLocation::new(path_hits.distinct_path_part.clone(), l.inner)
+                        TextLocation::new(&path_part, l.inner)
                     })
                     .collect::<Vec<TextLocation>>()
                     .into();
@@ -360,23 +365,30 @@ impl Add for TagIndex {
         TagIndex {
             root_path: self.root_path,
             tags_to_locations: HashMap::from_iter(
-                self.tags_to_locations.into_iter().chain(rhs.tags_to_locations),
+                self.tags_to_locations
+                    .into_iter()
+                    .chain(rhs.tags_to_locations),
             )
             .into(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, IntoIterator)]
 pub struct FoundTagsAtPath {
     #[allow(dead_code)]
     pub full_path: PathBuf,
     pub distinct_path_part: String,
+    #[into_iterator(owned, ref, ref_mut)]
     pub hits: FoundTags,
 }
 
 impl FoundTagsAtPath {
-    pub fn try_new(full_path: &Path, distinct_path_part: &str, hits: Option<FoundTags>) -> Option<Self> {
+    pub fn try_new(
+        full_path: &Path,
+        distinct_path_part: &str,
+        hits: Option<FoundTags>,
+    ) -> Option<Self> {
         hits.map(|h| Self {
             full_path: full_path.to_path_buf(),
             distinct_path_part: distinct_path_part.to_string(),
@@ -388,7 +400,7 @@ impl FoundTagsAtPath {
 impl Display for FoundTagsAtPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{}:", self.distinct_path_part)?;
-        for (tag, locations) in &self.hits.tag_locations {
+        for (tag, locations) in self.hits.clone() {
             let locations = locations.clone(); // debug
             writeln!(f, "    tag: {}", tag)?;
             // println!("pathhits::display::locations: {:#?}", locations);
@@ -401,9 +413,10 @@ impl Display for FoundTagsAtPath {
 }
 
 /// Tags, their locations, and the pattern that found them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, IntoIterator)]
 pub struct FoundTags {
     pub pattern: String,
+    #[into_iterator(owned, ref, ref_mut)]
     pub tag_locations: TagTextRanges,
 }
 
@@ -436,11 +449,24 @@ impl FoundTags {
     pub fn len(&self) -> usize {
         self.tag_locations.len()
     }
-    
+
+    /// Whether this collection is empty or not
     pub fn is_empty(&self) -> bool {
         self.tag_locations.is_empty()
     }
 
+    /// Return the number of matches found for the given tag.
+    pub fn range_count_for(&self, tag: &Tag) -> usize {
+        self.tag_locations
+            .get(tag)
+            .map(TextRanges::len)
+            .unwrap_or_default()
+    }
+
+    /// Whether or not this set of ranges contains the given tag.
+    pub fn contains(&self, tag: &Tag) -> bool {
+        self.tag_locations.contains(tag)
+    }
 }
 
 impl FoundTags {
@@ -481,7 +507,7 @@ impl FoundTags {
 /// NewType wrapper around a [`HashMap<Tag, TextRanges>`]. The keys
 /// are [`Tag`] instances, the values collections of text  ranges.
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, IntoIterator, From, Index, IndexMut, PartialEq, Eq)]
 pub struct TagTextRanges {
     inner: HashMap<Tag, TextRanges>,
 }
@@ -499,141 +525,132 @@ impl TagTextRanges {
         self.inner.get(key)
     }
 
+    /// The collection of tags found.
     pub fn keys(&self) -> std::collections::hash_map::Keys<Tag, TextRanges> {
         self.inner.keys()
     }
 
+    /// The overall number of tags found.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
-    
+
+    /// Whether this collection is empty or not
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
-}
-
-impl IntoIterator for TagTextRanges {
-    type Item = (Tag, TextRanges);
-    type IntoIter = std::collections::hash_map::IntoIter<Tag, TextRanges>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
+    /// Return the number of matches found for the given tag.
+    pub fn range_count_for(&self, tag: &Tag) -> usize {
+        self.inner.get(tag).map(TextRanges::len).unwrap_or_default()
     }
-}
 
-impl<'a> IntoIterator for &'a TagTextRanges {
-    type Item = (&'a Tag, &'a TextRanges);
-    type IntoIter = std::collections::hash_map::Iter<'a, Tag, TextRanges>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut TagTextRanges {
-    type Item = (&'a Tag, &'a mut TextRanges);
-    type IntoIter = std::collections::hash_map::IterMut<'a, Tag, TextRanges>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.iter_mut()
+    /// Whether or not this set of ranges contains the given tag.
+    pub fn contains(&self, tag: &Tag) -> bool {
+        self.inner.contains_key(tag)
     }
 }
 
 /// Represents a fully-formed tag
 #[derive(
-    Default, Debug, Clone, PartialEq, Eq, PartialOrd, Hash, Display, Serialize, Deserialize,
+    Default,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Hash,
+    Display,
+    Serialize,
+    Deserialize,
+    AsRef,
+    From,
+    FromStr,
 )]
 #[serde(transparent)]
 pub struct Tag {
     inner: String,
 }
-impl<T> From<T> for Tag
-where
-    T: Into<String>,
-{
-    fn from(value: T) -> Self {
-        Self {
-            inner: value.into(),
-        }
-    }
-}
-
-impl AsRef<str> for Tag {
-    fn as_ref(&self) -> &str {
-        self.inner.as_str()
-    }
-}
 
 /// Newtype wrapper around a vec of TextRanges.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, IntoIterator, From, Deref, DerefMut, PartialEq, Eq)]
+#[deref(forward)]
+#[deref_mut(forward)]
 pub struct TextRanges {
     inner: Vec<TextRange>,
 }
 
-impl<T> From<T> for TextRanges where T: Into<Vec<TextRange>> {
-    fn from(value: T) -> Self {
-        Self { inner: value.into() }
-    }
-}
-
-impl IntoIterator for TextRanges {
-    type Item = TextRange;
-    type IntoIter = std::vec::IntoIter<TextRange>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a TextRanges {
-    type Item = &'a TextRange;
-    type IntoIter = std::slice::Iter<'a, TextRange>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut TextRanges {
-    type Item = &'a mut TextRange;
-    type IntoIter = std::slice::IterMut<'a, TextRange>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.iter_mut()
-    }
-}
-
 impl TextRanges {
-    fn push(&mut self, value: TextRange) {
+    pub fn push(&mut self, value: TextRange) {
         self.inner.push(value)
+    }
+
+    pub fn append(&mut self, other: &mut Self) {
+        self.inner.append(&mut other.inner)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 
 /// Newtype wrapper around a [`Range<usize>'].
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    From,
+    IntoIterator,
+    Index,
+    IndexMut,
+)]
 #[serde(transparent)]
 pub struct TextRange {
     inner: Range<usize>,
 }
 impl TextRange {
+    /// The start byte of the tag text within its source.
+    /// According to the `regex` crate docs:
+    ///
+    /// > Returns the byte offset of the start of the match in the haystack. The
+    /// > start of the match corresponds to the position where the match begins
+    /// > and includes the first byte in the match. > > It is guaranteed that
+    /// > Match::start() <= Match::end(). > > This is guaranteed to fall on a
+    /// > valid UTF-8 codepoint boundary. That is, it will never be an offset that
+    /// > appears between the UTF-8 code units of a UTF-8 encoded Unicode scalar
+    /// > value. Consequently, it is always safe to slice the corresponding
+    /// > haystack using this offset.
+    ///
+    /// — https://docs.rs/regex/latest/regex/struct.Match.html#method.start
     fn start(&self) -> usize {
         self.inner.start
     }
 
+    /// > Returns the byte offset of the end of the match in the haystack. The
+    /// > end of the match corresponds to the byte immediately following the last
+    /// > byte in the match. This means that &slice[start..end] works as one would
+    /// > expect. > > It is guaranteed that Match::start() <= Match::end(). > >
+    /// > This is guaranteed to fall on a valid UTF-8 codepoint boundary. That is,
+    /// > it will never be an offset that appears between the UTF-8 code units of
+    /// > a UTF-8 encoded Unicode scalar value. Consequently, it is always safe to
+    /// > slice the corresponding haystack using this offset.
+    ///
+    /// — https://docs.rs/regex/latest/regex/struct.Match.html#method.end
     fn end(&self) -> usize {
         self.inner.end
     }
 }
 
-impl From<Range<usize>> for TextRange {
-    fn from(value: Range<usize>) -> Self {
-        Self { inner: value }
-    }
-}
-
 impl Display for TextRange {
-    
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.inner.start, self.inner.end)
     }
