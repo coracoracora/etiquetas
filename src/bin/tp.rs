@@ -7,7 +7,11 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
-use etiquetas::etq::model::{FoundTags, FoundTagsAtPath, TagIndex};
+use etiquetas::etq::{
+    mdscanner::{self, ScanEvent},
+    model::{FoundTags, FoundTagsAtPath, TagIndex},
+};
+use pulldown_cmark::{Event, Parser as MDParser, TextMergeWithOffset};
 use regex::Regex;
 
 /// tp: A Tag Processor
@@ -66,6 +70,18 @@ enum Commands {
         #[arg(short = 'f', long = "follow-symlinks")]
         follow_symlinks: bool,
     },
+
+    /// Dump markdown events from a parse.
+    Dump {
+        #[arg(short, long)]
+        file: String,
+    },
+
+    /// Scan using the pull parser.
+    Pull {
+        #[arg(short, long)]
+        file: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -77,7 +93,42 @@ fn main() -> Result<()> {
             include_dotfiles,
             follow_symlinks,
         } => handle_scan(path, follow_symlinks.into(), include_dotfiles.into()),
+        // Commands::Dump { file } => handle_dump(file),
+        Commands::Dump { file } => scan_markdown_file(file),
+        Commands::Pull { file } => handle_dump(file),
     }
+}
+
+fn handle_dump(path_str: &str) -> Result<()> {
+    let path: PathBuf = path_str.into();
+
+    let content = read_to_string(path)?;
+    let mut event_stack: Vec<String> = vec![];
+
+    let parser_iter = TextMergeWithOffset::new(MDParser::new(&content).into_offset_iter());
+    for (event, range) in parser_iter {
+        println!(
+            "EVENT: {3:?} :: {0}@{1}..{2}",
+            event_stack
+                .clone()
+                .into_iter()
+                .fold("*".to_string(), |acc, e| format!("{} → {}", acc, e)),
+            range.start,
+            range.end,
+            event
+        );
+        match event {
+            Event::Start(t) => {
+                let _ = event_stack.push(format!("{:?}", t));
+            }
+            Event::End(_) => {
+                let _ = event_stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 /// Handle a scan command.
@@ -135,7 +186,6 @@ fn scan_path(
 
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
         my_tag_index.add_path_hits(scan_file(path, parent_prefix_len)?);
-        // println!("Done with path: {}", path.display());
         return Ok(my_tag_index);
     }
 
@@ -163,20 +213,31 @@ fn scan_path(
     Ok(my_tag_index)
 }
 
+fn scan_markdown_file(path: &str) -> Result<()> {
+    let body = read_to_string(path)?;
+    let scanner = mdscanner::MarkdownScanner::new(&body, |t| {
+        let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
+        let ret: Vec<_> = re
+            .find_iter(t)
+            .map(|m| (m.as_str().to_owned().into(), m.range().into()))
+            .collect();
+        ret
+    });
+    for evt in scanner.into_iter().map(|e| match e { ScanEvent::TagsFound(t) => t}).flatten() {
+        println!("{:?}", evt)
+    }
+    Ok(())
+}
+
 fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<FoundTagsAtPath>> {
-    // println!("Scanning file: {}", path.display());
     let body = read_to_string(path)?;
     let mut distinct_path_part = path.display().to_string();
     distinct_path_part.replace_range(..prefix_len + 1, "");
-    // let ret =
     Ok(FoundTagsAtPath::try_new(
         path,
         &distinct_path_part,
         scan_text(&body),
     ))
-    // ;
-    // println!("Finished scanning file: {}, ret: {:?}", path.display(), ret);
-    // ret
 }
 
 fn scan_text(text: &str) -> Option<FoundTags> {
@@ -188,9 +249,7 @@ fn scan_text(text: &str) -> Option<FoundTags> {
         .find_iter(text)
         .map(|m| (m.as_str().to_owned(), m.range()))
     {
-        // println!("Found match: {:?}", hit);
         hitmap.add_hit(hit.0, &hit.1.into())
     }
-    // println!("Finished scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
     hitmap.if_nonempty()
 }
