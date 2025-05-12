@@ -10,21 +10,11 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 /// Represents a location of a tag in a file, at a byte range (verify... maybe codepoint?)
-#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Debug, Display, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[display("{}@{}", self.path.display(), self.range)]
 pub struct TextLocation {
     path: PathBuf,
     range: TextRange,
-}
-impl Display for TextLocation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}@{}..{}",
-            self.path.display(),
-            self.range.start(),
-            self.range.end(),
-        )
-    }
 }
 
 impl TextLocation {
@@ -219,7 +209,6 @@ impl AsRef<str> for TagGroup {
 }
 
 impl From<std::borrow::Cow<'_, str>> for TagGroup {
-    
     fn from(value: std::borrow::Cow<'_, str>) -> Self {
         let tag_string: String = value.into();
         Self(tag_string.into())
@@ -335,7 +324,7 @@ impl TagIndex {
         // gnarly
         if let Some(path_hits) = path_hits {
             // println!("addin path hits: {}", path_hits);
-            // 
+            //
             let path_part = path_hits.distinct_path_part.to_string();
 
             for (tag, locations) in path_hits {
@@ -507,7 +496,19 @@ impl FoundTags {
 /// NewType wrapper around a [`HashMap<Tag, TextRanges>`]. The keys
 /// are [`Tag`] instances, the values collections of text  ranges.
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, IntoIterator, From, Index, IndexMut, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    IntoIterator,
+    From,
+    Index,
+    IndexMut,
+    PartialEq,
+    Eq,
+)]
 pub struct TagTextRanges {
     inner: HashMap<Tag, TextRanges>,
 }
@@ -573,7 +574,19 @@ pub struct Tag {
 }
 
 /// Newtype wrapper around a vec of TextRanges.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, IntoIterator, From, Deref, DerefMut, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    IntoIterator,
+    From,
+    Deref,
+    DerefMut,
+    PartialEq,
+    Eq,
+)]
 #[deref(forward)]
 #[deref_mut(forward)]
 pub struct TextRanges {
@@ -601,6 +614,7 @@ impl TextRanges {
 /// Newtype wrapper around a [`Range<usize>'].
 #[derive(
     Debug,
+    Display,
     Clone,
     Serialize,
     Deserialize,
@@ -613,6 +627,7 @@ impl TextRanges {
     Index,
     IndexMut,
 )]
+#[display("{}..{}", self.start(), self.end())]
 #[serde(transparent)]
 pub struct TextRange {
     inner: Range<usize>,
@@ -647,11 +662,5 @@ impl TextRange {
     /// — https://docs.rs/regex/latest/regex/struct.Match.html#method.end
     fn end(&self) -> usize {
         self.inner.end
-    }
-}
-
-impl Display for TextRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}..{}", self.inner.start, self.inner.end)
     }
 }
