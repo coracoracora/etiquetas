@@ -8,7 +8,9 @@ edition = "2024"
 anyhow = { version = "1.0.98", features = ["backtrace"] }
 clap = { version = "4.5.37", features = ["derive", "env"] }
 derive_more = { version = "2.0.1", features = ["full"] }
+pulldown-cmark = { version = "0.13.0", features = ["serde", "simd"] }
 regex = "1.11.1"
 serde = { version = "1.0.219", features = ["derive"] }
+tera = "1.20.0"
 thiserror = "2.0.12"
 toml = "0.8.22"
