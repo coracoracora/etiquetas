@@ -8,8 +8,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
 use etiquetas::etq::{
-    mdscanner::{self, ScanEvent},
-    model::{FoundTags, FoundTagsAtPath, TagIndex},
+    mdscanner::{self, ScanEvent, TagsFound},
+    model::TagIndex,
 };
 use pulldown_cmark::{Event, Parser as MDParser, TextMergeWithOffset};
 use regex::Regex;
@@ -93,8 +93,10 @@ fn main() -> Result<()> {
             include_dotfiles,
             follow_symlinks,
         } => handle_scan(path, follow_symlinks.into(), include_dotfiles.into()),
-        // Commands::Dump { file } => handle_dump(file),
-        Commands::Dump { file } => scan_markdown_file(file),
+        Commands::Dump { file } => {
+            let _ = scan_markdown_file(PathBuf::from(file).as_ref())?;
+            Ok(())
+        }
         Commands::Pull { file } => handle_dump(file),
     }
 }
@@ -119,7 +121,7 @@ fn handle_dump(path_str: &str) -> Result<()> {
         );
         match event {
             Event::Start(t) => {
-                let _ = event_stack.push(format!("{:?}", t));
+                event_stack.push(format!("{:?}", t));
             }
             Event::End(_) => {
                 let _ = event_stack.pop();
@@ -166,7 +168,7 @@ fn scan_path(
     path: &Path,
     follow_symlinks: FollowSymlinksFlag,
     include_dotfiles: IncludeDotfilesFlag,
-    parent_prefix_len: usize,
+    _parent_prefix_len: usize,
     _parent_scan_depth: usize,
 ) -> Result<TagIndex> {
     // println!("Scanning path: {} ", path.display());
@@ -185,7 +187,11 @@ fn scan_path(
     }
 
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-        my_tag_index.add_path_hits(scan_file(path, parent_prefix_len)?);
+        // my_tag_index.add_path_hits(scan_file(path, parent_prefix_len)?);
+        let hits = scan_markdown_file(path)?;
+        for tag in hits.1 {
+            my_tag_index.add_tag_location(&tag.tag, hits.0.clone(), tag.range_in_body);
+        }
         return Ok(my_tag_index);
     }
 
@@ -201,19 +207,19 @@ fn scan_path(
                             &d.path(),
                             follow_symlinks,
                             include_dotfiles,
-                            parent_prefix_len,
+                            _parent_prefix_len,
                             _parent_scan_depth + 1,
                         )?;
                 }
             }
         }
     }
-    // println!("Done with path: {}", path.display());
 
     Ok(my_tag_index)
 }
 
-fn scan_markdown_file(path: &str) -> Result<()> {
+/// Scan a markdown file using pulldown_cmark.
+fn scan_markdown_file(path: &Path) -> Result<(PathBuf, TagsFound)> {
     let body = read_to_string(path)?;
     let scanner = mdscanner::MarkdownScanner::new(&body, |t| {
         let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
@@ -223,33 +229,41 @@ fn scan_markdown_file(path: &str) -> Result<()> {
             .collect();
         ret
     });
-    for evt in scanner.into_iter().map(|e| match e { ScanEvent::TagsFound(t) => t}).flatten() {
-        println!("{:?}", evt)
-    }
-    Ok(())
+    // for evt in scanner.into_iter().map(|e| match e { ScanEvent::TagsFound(t) => t}).flatten() {
+    //     println!("{:?}", evt)
+    // }
+    let found: TagsFound = scanner
+        .into_iter()
+        .flat_map(|e| match e {
+            ScanEvent::TagsFound(t) => t,
+        })
+        .collect();
+
+    Ok((path.into(), found.to_owned()))
 }
 
-fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<FoundTagsAtPath>> {
-    let body = read_to_string(path)?;
-    let mut distinct_path_part = path.display().to_string();
-    distinct_path_part.replace_range(..prefix_len + 1, "");
-    Ok(FoundTagsAtPath::try_new(
-        path,
-        &distinct_path_part,
-        scan_text(&body),
-    ))
-}
 
-fn scan_text(text: &str) -> Option<FoundTags> {
-    // println!("Scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
+// fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<FoundTagsAtPath>> {
+//     let body = read_to_string(path)?;
+//     let mut distinct_path_part = path.display().to_string();
+//     distinct_path_part.replace_range(..prefix_len + 1, "");
+//     Ok(FoundTagsAtPath::try_new(
+//         path,
+//         &distinct_path_part,
+//         scan_text(&body),
+//     ))
+// }
 
-    let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
-    let mut hitmap = FoundTags::new(re.to_string()); // this feels hacky
-    for hit in re
-        .find_iter(text)
-        .map(|m| (m.as_str().to_owned(), m.range()))
-    {
-        hitmap.add_hit(hit.0, &hit.1.into())
-    }
-    hitmap.if_nonempty()
-}
+// fn scan_text(text: &str) -> Option<FoundTags> {
+//     // println!("Scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
+
+//     let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
+//     let mut hitmap = FoundTags::new(re.to_string()); // this feels hacky
+//     for hit in re
+//         .find_iter(text)
+//         .map(|m| (m.as_str().to_owned(), m.range()))
+//     {
+//         hitmap.add_hit(hit.0, &hit.1.into())
+//     }
+//     hitmap.if_nonempty()
+// }

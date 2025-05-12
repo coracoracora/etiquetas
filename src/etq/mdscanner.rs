@@ -1,53 +1,51 @@
-use std::borrow::Cow;
-
 use derive_more::IntoIterator;
 use pulldown_cmark::{OffsetIter, Parser, TextMergeWithOffset};
 
 use super::model::{Tag, TextRange};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct TagFound<'a> {
+pub struct TagFound {
     /// The tag found
     pub tag: Tag,
 
     /// The range of the tag, in bytes, with respect to the body of the content being parsed.
-    range_in_body: TextRange,
+    pub range_in_body: TextRange,
 
     /// Text
-    found_in_text: Cow<'a, str>,
+    pub found_in_text: String,
 
     /// The range of the tag, in bytes, in the element.
-    range_in_text: TextRange,
+    pub range_in_text: TextRange,
 }
 
 #[derive(Debug, Default, Clone, Hash, PartialEq, IntoIterator)]
-pub struct TagsFound<'a>(pub Vec<TagFound<'a>>);
+pub struct TagsFound(pub Vec<TagFound>);
 
-impl<'a> FromIterator<TagFound<'a>> for TagsFound<'a> {
-    fn from_iter<T: IntoIterator<Item = TagFound<'a>>>(iter: T) -> Self {
+impl FromIterator<TagFound> for TagsFound {
+    fn from_iter<T: IntoIterator<Item = TagFound>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl<'a> TagsFound<'a> {
+impl TagsFound {
     pub fn len(&self) -> usize {
         self.0.len()
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    pub fn push(&mut self, other: TagFound<'a>) {
+    pub fn push(&mut self, other: TagFound) {
         self.0.push(other)
     }
-    pub fn append(&mut self, other: &mut TagsFound<'a>) {
+    pub fn append(&mut self, other: &mut TagsFound) {
         self.0.append(&mut other.0)
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum ScanEvent<'a> {
+pub enum ScanEvent {
     /// We've found a tag at the given path in the current file.
-    TagsFound(TagsFound<'a>),
+    TagsFound(TagsFound),
 }
 
 // #[derive(Debug, Clone, Default)]
@@ -78,12 +76,12 @@ where
     }
 }
 
-impl<'a, M, I> Iterator for MarkdownScanner<'a, M, I>
+impl<M, I> Iterator for MarkdownScanner<'_, M, I>
 where
     M: FnMut(&str) -> I,
     I: IntoIterator<Item = (Tag, TextRange)>,
 {
-    type Item = ScanEvent<'a>;
+    type Item = ScanEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut acc = TagsFound::default();

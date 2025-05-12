@@ -285,6 +285,12 @@ impl TagIndex {
             tags_to_locations: TagsToLocations::default(),
         }
     }
+    
+    pub fn add_tag_location(&mut self, tag: &Tag, path: PathBuf, range: TextRange) {
+        let entry = self.tags_to_locations.entry(tag.to_owned()).or_default();
+        let location  = TextLocation { path, range };
+        entry.push(&location)
+    }
 
     pub fn group_with_grouper<'a>(&'a self, grouper: &'a TagGrouper) -> TagGroups {
         self.group_keys(
