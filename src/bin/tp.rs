@@ -86,15 +86,18 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    
+    let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
+        .expect("Failed to compile regex!");
 
     match &cli.command {
         Commands::Scan {
             path,
             include_dotfiles,
             follow_symlinks,
-        } => handle_scan(path, follow_symlinks.into(), include_dotfiles.into()),
+        } => handle_scan(path, &re, follow_symlinks.into(), include_dotfiles.into()),
         Commands::Dump { file } => {
-            let _ = scan_markdown_file(PathBuf::from(file).as_ref())?;
+            let _ = scan_markdown_file(PathBuf::from(file).as_ref(), &re)?;
             Ok(())
         }
         Commands::Pull { file } => handle_dump(file),
@@ -138,6 +141,7 @@ fn handle_dump(path_str: &str) -> Result<()> {
 ///
 fn handle_scan(
     path_str: &str,
+    re: &Regex,
     follow_symlinks: FollowSymlinksFlag,
     include_dotfiles: IncludeDotfilesFlag,
 ) -> Result<()> {
@@ -145,6 +149,7 @@ fn handle_scan(
     let parent_prefix_len = path.display().to_string().len();
     let index = scan_path(
         &path,
+        &re,
         follow_symlinks,
         include_dotfiles,
         parent_prefix_len,
@@ -166,6 +171,7 @@ fn handle_scan(
 /// - `parent_scan_depth`: The depth of the scan at the call site.
 fn scan_path(
     path: &Path,
+    re: &Regex,
     follow_symlinks: FollowSymlinksFlag,
     include_dotfiles: IncludeDotfilesFlag,
     _parent_prefix_len: usize,
@@ -187,7 +193,7 @@ fn scan_path(
     }
 
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-        let hits = scan_markdown_file(path)?;
+        let hits = scan_markdown_file(path, re)?;
         for tag in hits.1 {
             my_tag_index.add_tag_location(&tag.tag, hits.0.clone(), tag.range_in_body);
         }
@@ -204,6 +210,7 @@ fn scan_path(
                     my_tag_index = my_tag_index
                         + scan_path(
                             &d.path(),
+                            re,
                             follow_symlinks,
                             include_dotfiles,
                             _parent_prefix_len,
@@ -218,12 +225,12 @@ fn scan_path(
 }
 
 /// Scan a markdown file using pulldown_cmark.
-fn scan_markdown_file(path: &Path) -> Result<(PathBuf, TagsFound)> {
+fn scan_markdown_file(path: &Path, re: &Regex) -> Result<(PathBuf, TagsFound)> {
     let body = read_to_string(path)?;
     let scanner = mdscanner::MarkdownScanner::new(&body, |t| {
-        Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
-            .expect("Failed to compile regex!")
-            .find_iter(t)
+        // Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
+        //     .expect("Failed to compile regex!")
+            re.find_iter(t)
             .map(|m| (m.as_str().to_owned().into(), m.range().into()))
             .collect::<Vec<_>>()
     });
