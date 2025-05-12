@@ -187,7 +187,6 @@ fn scan_path(
     }
 
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-        // my_tag_index.add_path_hits(scan_file(path, parent_prefix_len)?);
         let hits = scan_markdown_file(path)?;
         for tag in hits.1 {
             my_tag_index.add_tag_location(&tag.tag, hits.0.clone(), tag.range_in_body);
@@ -222,16 +221,12 @@ fn scan_path(
 fn scan_markdown_file(path: &Path) -> Result<(PathBuf, TagsFound)> {
     let body = read_to_string(path)?;
     let scanner = mdscanner::MarkdownScanner::new(&body, |t| {
-        let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
-        let ret: Vec<_> = re
+        Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
+            .expect("Failed to compile regex!")
             .find_iter(t)
             .map(|m| (m.as_str().to_owned().into(), m.range().into()))
-            .collect();
-        ret
+            .collect::<Vec<_>>()
     });
-    // for evt in scanner.into_iter().map(|e| match e { ScanEvent::TagsFound(t) => t}).flatten() {
-    //     println!("{:?}", evt)
-    // }
     let found: TagsFound = scanner
         .into_iter()
         .flat_map(|e| match e {
@@ -239,31 +234,5 @@ fn scan_markdown_file(path: &Path) -> Result<(PathBuf, TagsFound)> {
         })
         .collect();
 
-    Ok((path.into(), found.to_owned()))
+    Ok((path.into(), found))
 }
-
-
-// fn scan_file(path: &Path, prefix_len: usize) -> Result<Option<FoundTagsAtPath>> {
-//     let body = read_to_string(path)?;
-//     let mut distinct_path_part = path.display().to_string();
-//     distinct_path_part.replace_range(..prefix_len + 1, "");
-//     Ok(FoundTagsAtPath::try_new(
-//         path,
-//         &distinct_path_part,
-//         scan_text(&body),
-//     ))
-// }
-
-// fn scan_text(text: &str) -> Option<FoundTags> {
-//     // println!("Scanning text: {}...", text.get(0..50).expect("Unable to get text from str!"));
-
-//     let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
-//     let mut hitmap = FoundTags::new(re.to_string()); // this feels hacky
-//     for hit in re
-//         .find_iter(text)
-//         .map(|m| (m.as_str().to_owned(), m.range()))
-//     {
-//         hitmap.add_hit(hit.0, &hit.1.into())
-//     }
-//     hitmap.if_nonempty()
-// }
