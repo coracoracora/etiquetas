@@ -86,9 +86,8 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    
-    let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
-        .expect("Failed to compile regex!");
+
+    let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
 
     match &cli.command {
         Commands::Scan {
@@ -230,14 +229,23 @@ fn scan_markdown_file(path: &Path, re: &Regex) -> Result<(PathBuf, TagsFound)> {
     let scanner = mdscanner::MarkdownScanner::new(&body, |t| {
         // Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
         //     .expect("Failed to compile regex!")
-            re.find_iter(t)
+        re.find_iter(t)
             .map(|m| (m.as_str().to_owned().into(), m.range().into()))
             .collect::<Vec<_>>()
     });
     let found: TagsFound = scanner
         .into_iter()
         .flat_map(|e| match e {
-            ScanEvent::TagsFound(t) => t,
+            ScanEvent::TagsFound(t) => {
+                println!(
+                    "Tags Found in {}: \n{}\n",
+                    path.file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or("-".to_string()),
+                    t
+                );
+                t
+            }
         })
         .collect();
 

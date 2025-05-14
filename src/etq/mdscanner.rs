@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{fmt::Display, marker::PhantomData};
 
 use derive_more::IntoIterator;
 use pulldown_cmark::{Event, HeadingLevel, OffsetIter, Parser, Tag as CMTag, TextMergeWithOffset};
@@ -27,7 +27,15 @@ trait EventHelpers {
 
 impl EventHelpers for Event<'_> {
     fn is_heading_start(&self) -> bool {
-        matches!(self, Event::Start(CMTag::Heading { level:_, id:_, classes:_, attrs:_ }))
+        matches!(
+            self,
+            Event::Start(CMTag::Heading {
+                level: _,
+                id: _,
+                classes: _,
+                attrs: _
+            })
+        )
     }
 
     fn is_heading_end(&self) -> bool {
@@ -53,7 +61,6 @@ impl<'a> From<Event<'a>> for StartEvent {
 pub struct InterEvent(Event<'static>);
 impl EventGroupMember for InterEvent {}
 impl<'a> From<Event<'a>> for InterEvent {
-    
     fn from(value: Event<'a>) -> Self {
         if !value.is_heading_inter() {
             panic!("Not a heading inter: {:?}", value)
@@ -80,6 +87,18 @@ pub struct Heading {
     pub start_event: StartEvent,
     pub end_event: EndEvent,
     pub inter_events: Vec<InterEvent>,
+}
+
+impl Display for Heading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {}{}",
+            self.level(),
+            self.text().unwrap_or("<empty>".to_string()),
+            self.id().map(|i| format!(" (id: {})", i)).unwrap_or("".to_string())
+        )
+    }
 }
 
 impl std::hash::Hash for Heading {
@@ -230,8 +249,37 @@ pub struct TagFound {
     pub in_heading: Option<Heading>,
 }
 
+impl Display for TagFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} at {}{}",
+            self.tag,
+            self.range_in_body,
+            self.in_heading
+                .as_ref()
+                .map(|h| format!(", under {}", h).to_string())
+                .unwrap_or("".to_string())
+        )
+    }
+}
+
 #[derive(Debug, Default, Clone, Hash, PartialEq, IntoIterator)]
 pub struct TagsFound(pub Vec<TagFound>);
+
+impl Display for TagsFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            self.0
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<String>>()
+                .join("\n")
+        )
+    }
+}
 
 impl FromIterator<TagFound> for TagsFound {
     fn from_iter<T: IntoIterator<Item = TagFound>>(iter: T) -> Self {
