@@ -69,16 +69,34 @@ enum Commands {
 
         #[arg(short = 'f', long = "follow-symlinks")]
         follow_symlinks: bool,
+
+        /// The pattern to use for recognizing tags
+        #[arg(short = 't', long, default_value = r"\#fg::\w+::[a-zA-Z0-9_\-]+")]
+        tag_pattern: String,
+
+        /// The pattern to use for grouping tags. This must contain at least
+        /// one capture group, which will be used for grouping. If more than
+        /// one group is included, the first will be used.
+        #[arg(short = 'g', long, default_value = r"(\#fg\:\:[^:]+)(::.*\b)")]
+        group_pattern: String,
+        
+        /// If present, the maximum recursion depth for the path scan. Unspecified = unlimited.
+        #[arg(short = 'm', long)]
+        max_depth: Option<usize>,
     },
 
     /// Scan and dump a file using the bespoke Markdown acanner.
-    MDScan {
+    ScanFile {
         #[arg(short, long)]
         file: String,
+
+        /// The pattern to use for recognizing tags
+        #[arg(short = 'p', long, default_value = r"\#fg::\w+::[a-zA-Z0-9_\-]+")]
+        tag_pattern: String,
     },
 
     /// Scan using the default pull parser.
-    Pull {
+    DumpEvents {
         #[arg(short, long)]
         file: String,
     },
@@ -87,23 +105,40 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let re = Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+").expect("Failed to compile regex!");
-
     match &cli.command {
         Commands::Scan {
             path,
             include_dotfiles,
             follow_symlinks,
-        } => handle_scan(path, &re, follow_symlinks.into(), include_dotfiles.into()),
-        Commands::MDScan { file } => {
-            let _ = scan_markdown_file(PathBuf::from(file).as_ref(), &re)?;
+            tag_pattern,
+            group_pattern,
+            max_depth
+        } => {
+            let tag_re = Regex::new(tag_pattern)?;
+            let group_re = Regex::new(group_pattern)?;
+            handle_scan(
+                path,
+                &tag_re,
+                &group_re,
+                follow_symlinks.into(),
+                include_dotfiles.into(),
+                *max_depth,
+            )
+        }
+        Commands::ScanFile { file, tag_pattern } => {
+            let tag_re = Regex::new(tag_pattern)?;
+            let _ = scan_markdown_file(PathBuf::from(file).as_ref(), &tag_re)?;
             Ok(())
         }
-        Commands::Pull { file } => handle_pull(file),
+        Commands::DumpEvents { file } =>  {
+            handle_dump_markdown_parse_events(file)
+        }
     }
 }
 
-fn handle_pull(path_str: &str) -> Result<()> {
+/// Bare parse of the given markdown file, 
+/// dumping events as they're received.
+fn handle_dump_markdown_parse_events(path_str: &str) -> Result<()> {
     let path: PathBuf = path_str.into();
 
     let content = read_to_string(path)?;
@@ -135,27 +170,35 @@ fn handle_pull(path_str: &str) -> Result<()> {
     Ok(())
 }
 
-/// Handle a scan command.
+/// Handle a scan of markdown files in a directory tree.
 /// - `path_str`: The path to scan
-///
+/// - `tag_re`: The regex to use for tag recognition.
+/// - `group_re`: The regex that will be applied to each recognized tag
+///   when grouping. At least one capture must be specified;
+///   if more than one is specified, then the first is used.
+/// - `follow_symlinks`: If true, symlinks will be followed when scanning
+///   the tree. If false, they won't.
+/// - `include_dotfiles`: If true, dotfiles / dotdirs will be included
+///   in the scan. If false, they won't.
 fn handle_scan(
     path_str: &str,
-    re: &Regex,
+    tag_re: &Regex,
+    group_re: &Regex,
     follow_symlinks: FollowSymlinksFlag,
     include_dotfiles: IncludeDotfilesFlag,
+    max_depth: Option<usize>,
 ) -> Result<()> {
     let path: PathBuf = path_str.into();
-    let parent_prefix_len = path.display().to_string().len();
     let index = scan_path(
         &path,
-        re,
+        tag_re,
         follow_symlinks,
         include_dotfiles,
-        parent_prefix_len,
+        max_depth,
         0,
     )?;
     let _grouping = index.group_keys(
-        r"(\#fg\:\:[^:]+)(::.*\b)",
+        group_re,
         |c| (c[1]).to_string(),
         "A default grouping based upon project::type stemming.",
     );
@@ -166,18 +209,29 @@ fn handle_scan(
 /// Scan a path. If it's a directory, descend. If it's a file,
 /// scan the file.
 /// - `path`: The path to scan
+/// - `re`: The regex to be used for finding tags.
 /// - `follow_symlinks`: If true, follow symlinks. If false, ignore them.
-/// - `parent_scan_depth`: The depth of the scan at the call site.
+/// - `include_dotfiles`: If true, dotfiles and dotdirs will be included
+///   in scanning and traversal, respectively.
+/// - `_parent_prefix_len`: The length of the 
+/// - `_parent_scan_depth`: The depth of the scan at the call site.
 fn scan_path(
     path: &Path,
     re: &Regex,
     follow_symlinks: FollowSymlinksFlag,
     include_dotfiles: IncludeDotfilesFlag,
-    _parent_prefix_len: usize,
-    _parent_scan_depth: usize,
+    max_depth: Option<usize>,
+    parent_scan_depth: usize,
 ) -> Result<TagIndex> {
+    
     // println!("Scanning path: {} ", path.display());
     let mut my_tag_index = TagIndex::new(path);
+    
+    if let Some(max_depth) = max_depth {
+        if parent_scan_depth >= max_depth {
+            return Ok(my_tag_index);
+        }
+    }
 
     if !follow_symlinks && path.is_symlink() {
         return Ok(my_tag_index);
@@ -212,8 +266,8 @@ fn scan_path(
                             re,
                             follow_symlinks,
                             include_dotfiles,
-                            _parent_prefix_len,
-                            _parent_scan_depth + 1,
+                            max_depth,
+                            parent_scan_depth + 1,
                         )?;
                 }
             }
@@ -227,8 +281,6 @@ fn scan_path(
 fn scan_markdown_file(path: &Path, re: &Regex) -> Result<(PathBuf, TagsFound)> {
     let body = read_to_string(path)?;
     let scanner = mdscanner::MarkdownScanner::new(&body, |t| {
-        // Regex::new(r"\#fg::\w+::[a-zA-Z0-9_\-]+")
-        //     .expect("Failed to compile regex!")
         re.find_iter(t)
             .map(|m| (m.as_str().to_owned().into(), m.range().into()))
             .collect::<Vec<_>>()
