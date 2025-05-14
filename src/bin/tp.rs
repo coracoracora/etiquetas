@@ -71,13 +71,13 @@ enum Commands {
         follow_symlinks: bool,
     },
 
-    /// Dump markdown events from a parse.
-    Dump {
+    /// Scan and dump a file using the bespoke Markdown acanner.
+    MDScan {
         #[arg(short, long)]
         file: String,
     },
 
-    /// Scan using the pull parser.
+    /// Scan using the default pull parser.
     Pull {
         #[arg(short, long)]
         file: String,
@@ -96,15 +96,15 @@ fn main() -> Result<()> {
             include_dotfiles,
             follow_symlinks,
         } => handle_scan(path, &re, follow_symlinks.into(), include_dotfiles.into()),
-        Commands::Dump { file } => {
+        Commands::MDScan { file } => {
             let _ = scan_markdown_file(PathBuf::from(file).as_ref(), &re)?;
             Ok(())
         }
-        Commands::Pull { file } => handle_dump(file),
+        Commands::Pull { file } => handle_pull(file),
     }
 }
 
-fn handle_dump(path_str: &str) -> Result<()> {
+fn handle_pull(path_str: &str) -> Result<()> {
     let path: PathBuf = path_str.into();
 
     let content = read_to_string(path)?;
@@ -149,7 +149,7 @@ fn handle_scan(
     let parent_prefix_len = path.display().to_string().len();
     let index = scan_path(
         &path,
-        &re,
+        re,
         follow_symlinks,
         include_dotfiles,
         parent_prefix_len,
