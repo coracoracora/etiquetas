@@ -85,7 +85,7 @@ enum Commands {
         /// one group is included, the first will be used.
         #[arg(short = 'g', long, default_value = r"(\#fg\:\:[^:]+)(::.*\b)")]
         group_pattern: String,
-        
+
         /// If present, the maximum recursion depth for the path scan. Unspecified = unlimited.
         #[arg(short = 'm', long)]
         max_depth: Option<usize>,
@@ -118,7 +118,7 @@ fn main() -> Result<()> {
             follow_symlinks,
             tag_pattern,
             group_pattern,
-            max_depth
+            max_depth,
         } => {
             let tag_re = Regex::new(tag_pattern)?;
             let group_re = Regex::new(group_pattern)?;
@@ -136,13 +136,11 @@ fn main() -> Result<()> {
             let _ = scan_markdown_file(PathBuf::from(file).as_ref(), &tag_re)?;
             Ok(())
         }
-        Commands::DumpEvents { file } =>  {
-            handle_dump_markdown_parse_events(file)
-        }
+        Commands::DumpEvents { file } => handle_dump_markdown_parse_events(file),
     }
 }
 
-/// Bare parse of the given markdown file, 
+/// Bare parse of the given markdown file,
 /// dumping events as they're received.
 fn handle_dump_markdown_parse_events(path_str: &str) -> Result<()> {
     let path: PathBuf = path_str.into();
@@ -219,7 +217,7 @@ fn handle_scan(
 /// - `follow_symlinks`: If true, follow symlinks. If false, ignore them.
 /// - `include_dotfiles`: If true, dotfiles and dotdirs will be included
 ///   in scanning and traversal, respectively.
-/// - `_parent_prefix_len`: The length of the 
+/// - `_parent_prefix_len`: The length of the
 /// - `_parent_scan_depth`: The depth of the scan at the call site.
 fn scan_path(
     path: &Path,
@@ -229,10 +227,9 @@ fn scan_path(
     max_depth: Option<usize>,
     parent_scan_depth: usize,
 ) -> Result<TagIndex> {
-    
     // println!("Scanning path: {} ", path.display());
     let mut my_tag_index = TagIndex::new(path);
-    
+
     if let Some(max_depth) = max_depth {
         if parent_scan_depth >= max_depth {
             return Ok(my_tag_index);
