@@ -14,15 +14,6 @@ use etiquetas::etq::{
 use pulldown_cmark::{Event, Parser as MDParser, TextMergeWithOffset};
 use regex::Regex;
 
-/// tp: A Tag Processor
-#[derive(Parser)]
-#[command(name = "clap-derive-cli")]
-#[command(about = "A CLI tool with a 'scan' subcommand", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
 #[derive(Debug, Clone, Copy, Default, Display, PartialEq, Eq, Hash, From)]
 struct FollowSymlinksFlag(bool);
 
@@ -54,6 +45,21 @@ impl Not for IncludeDotfilesFlag {
     fn not(self) -> Self::Output {
         self.0.not()
     }
+}
+
+/// tp: A Tag Processor
+#[derive(Parser)]
+#[command(name = "clap-derive-cli")]
+#[command(about = "A CLI tool with a 'scan' subcommand", long_about = None)]
+struct Cli {
+    
+    #[cfg(samply_kludges)]
+    /// Only used when we're debugging or profiling;
+    /// see https://github.com/PhilippPolterauer/cargo-samply/pull/7
+    samply_dummy_ignored: Option<String>,
+
+    #[command(subcommand)]
+    command: Commands,
 }
 
 #[derive(Subcommand)]
