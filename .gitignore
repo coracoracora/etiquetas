@@ -1,1 +1,4 @@
 /target
+flamegraph.svg
+profile.json.gz
+doc/fpo
