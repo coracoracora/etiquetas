@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
 use etiquetas::etq::{
+    embeddings::{SentenceEmbeddingsModelType, embed_and_cluster_tags},
     mdscanner::{self, ScanEvent, TagsFound},
     model::TagIndex,
 };
@@ -52,7 +53,6 @@ impl Not for IncludeDotfilesFlag {
 #[command(name = "clap-derive-cli")]
 #[command(about = "A CLI tool with a 'scan' subcommand", long_about = None)]
 struct Cli {
-    
     #[cfg(samply_kludges)]
     /// Only used when we're debugging or profiling;
     /// see https://github.com/PhilippPolterauer/cargo-samply/pull/7
@@ -60,6 +60,28 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Copy, Clone, Display)]
+#[display(
+    "{{ min_cluster_size: {}, tolerance: {} }}",
+    min_cluster_size,
+    tolerance
+)]
+struct ClusterReportConfig {
+    /// The minimum number of members allowed in a cluster.
+    min_cluster_size: usize,
+    /// The tolerance ("epsilon") value passed to the underlying DBSCAN clustering algorithm.
+    tolerance: f32,
+}
+
+impl Default for ClusterReportConfig {
+    fn default() -> Self {
+        Self {
+            min_cluster_size: 2,
+            tolerance: 0.975,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -70,14 +92,16 @@ enum Commands {
         #[arg(short, long)]
         path: String,
 
+        /// If enabled, dotfiles/dotdirs will be scanned.
         #[arg(short = 'd', long = "include-dotfiles")]
         include_dotfiles: bool,
 
+        /// If enable, symlinks will be followed.
         #[arg(short = 'f', long = "follow-symlinks")]
         follow_symlinks: bool,
 
         /// The pattern to use for recognizing tags
-        #[arg(short = 't', long, default_value = r"\#fg::\w+::[a-zA-Z0-9_\-]+")]
+        #[arg(short = 'r', long, default_value = r"\#fg::\w+::[a-zA-Z0-9_\-]+")]
         tag_pattern: String,
 
         /// The pattern to use for grouping tags. This must contain at least
@@ -87,8 +111,45 @@ enum Commands {
         group_pattern: String,
 
         /// If present, the maximum recursion depth for the path scan. Unspecified = unlimited.
-        #[arg(short = 'm', long)]
+        #[arg(short = 'x', long)]
         max_depth: Option<usize>,
+    },
+
+    /// Dump a tag cluster report. This scans tags and performs a cluster analysis
+    /// usng DBSCAN (see https://rust-ml.github.io/book/4_dbscan.html) and the given parameters.
+    Cluster {
+        /// The file or directory path to scan.
+        #[arg(short, long)]
+        path: String,
+
+        /// If enabled, dotfiles/dotdirs will be scanned.
+        #[arg(short = 'd', long = "include-dotfiles")]
+        include_dotfiles: bool,
+
+        /// If enable, symlinks will be followed.
+        #[arg(short = 'f', long = "follow-symlinks")]
+        follow_symlinks: bool,
+
+        /// The pattern to use for recognizing tags
+        #[arg(short = 'r', long, default_value = r"\#fg::\w+::[a-zA-Z0-9_\-]+")]
+        tag_pattern: String,
+
+        /// If present, the maximum recursion depth for the path scan. Unspecified = unlimited.
+        #[arg(short = 'x', long)]
+        max_depth: Option<usize>,
+
+        /// The minimum number of members for a cluster.
+        #[arg(short, long, default_value_t = 2)]
+        min_membership: usize,
+
+        /// The tolerance (or epsilon) hyperparameter for
+        /// the DBSCAN algorithm.
+        #[arg(short, long, default_value_t = 1.05)]
+        tolerance: f32,
+
+        /// The model to use.
+        #[arg(short = 'o', long, default_value = "all-mini-lm-l6v2")]
+        model: SentenceEmbeddingsModelType,
     },
 
     /// Scan and dump a file using the bespoke Markdown acanner.
@@ -131,6 +192,32 @@ fn main() -> Result<()> {
                 *max_depth,
             )
         }
+        Commands::Cluster {
+            path,
+            include_dotfiles,
+            follow_symlinks,
+            tag_pattern,
+            max_depth,
+            min_membership,
+            tolerance,
+            model,
+        } => {
+            let tag_re = Regex::new(tag_pattern)?;
+            let follow_symlinks: FollowSymlinksFlag = follow_symlinks.into();
+            let include_dotfiles: IncludeDotfilesFlag = include_dotfiles.into();
+            handle_cluster_cmd(
+                path,
+                &tag_re,
+                follow_symlinks,
+                include_dotfiles,
+                *max_depth,
+                0,
+                *min_membership,
+                *tolerance,
+                *model,
+            )
+        }
+
         Commands::ScanFile { file, tag_pattern } => {
             let tag_re = Regex::new(tag_pattern)?;
             let _ = scan_markdown_file(PathBuf::from(file).as_ref(), &tag_re)?;
@@ -138,6 +225,38 @@ fn main() -> Result<()> {
         }
         Commands::DumpEvents { file } => handle_dump_markdown_parse_events(file),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_cluster_cmd(
+    path_str: &str,
+    re: &Regex,
+    follow_symlinks: FollowSymlinksFlag,
+    include_dotfiles: IncludeDotfilesFlag,
+    max_depth: Option<usize>,
+    parent_scan_depth: usize,
+    min_membership: usize,
+    tolerance: f32,
+    model_type: SentenceEmbeddingsModelType,
+) -> Result<()> {
+    let tags = scan_path(
+        Path::new(path_str),
+        re,
+        follow_symlinks,
+        include_dotfiles,
+        max_depth,
+        parent_scan_depth,
+    )?
+    .tags();
+    let clusters = embed_and_cluster_tags(
+        tags,
+        tch::Device::Cpu,
+        model_type,
+        min_membership,
+        tolerance,
+    )?;
+    println!("{}", clusters);
+    Ok(())
 }
 
 /// Bare parse of the given markdown file,
@@ -292,13 +411,13 @@ fn scan_markdown_file(path: &Path, re: &Regex) -> Result<(PathBuf, TagsFound)> {
         .into_iter()
         .flat_map(|e| match e {
             ScanEvent::TagsFound(t) => {
-                println!(
-                    "Tags Found in {}: \n{}\n",
-                    path.file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or("-".to_string()),
-                    t
-                );
+                // println!(
+                //     "Tags Found in {}: \n{}\n",
+                //     path.file_name()
+                //         .map(|f| f.to_string_lossy().to_string())
+                //         .unwrap_or("-".to_string()),
+                //     t
+                // );
                 t
             }
         })
