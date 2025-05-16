@@ -11,21 +11,21 @@ bootstrap:
 
 [group("debug")]
 [doc('Generate a flamegraph; will create a file in ./flamegraph.svg')]
-flame:
+flame PATH_TO_SCAN:
     sudo CARGO_PROFILE_RELEASE_DEBUG=true \
     cargo flamegraph --bin tp -- \
-    scan -p  "/Users/cora/Library/Mobile Documents/iCloud~com~aschmid~notebooks/Documents/A Field Guide for Builders"
+    scan -p  PATH_TO_SCAN
 
 # WARNING: the `--cfg samply_kluges` is important; see Config.toml and  tp.rs.
 
 [group("debug")]
 [doc('Run Samply')]
-sample:
+sample PATH_TO_SCAN:
     sudo  \
     CARGO_PROFILE_RELEASE_DEBUG=true \
     RUSTFLAGS="-C link-args=-Wl,-rpath,/opt/homebrew/lib --cfg samply_kludges" \
     cargo samply --bin tp -- \
-    scan -p  "/Users/cora/Library/Mobile Documents/iCloud~com~aschmid~notebooks/Documents/A Field Guide for Builders"
+    scan -p  PATH_TO_SCAN
 
 install:
     RUSTFLAGS="-C link-args=-Wl,-rpath,/opt/homebrew/lib" \
