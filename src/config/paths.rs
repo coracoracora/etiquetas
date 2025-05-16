@@ -51,9 +51,9 @@ trait ConfigPath {
 pub(crate) struct AppData();
 impl ConfigPath for AppData {
     fn get_root_path() -> Result<PathBuf> {
-        Ok(BaseLocations::proj_dirs()
+        BaseLocations::proj_dirs()
             .map(|d| d.cache_dir().to_owned())
-            .ok_or(anyhow!("Unable to determine app data dir!"))?)
+            .ok_or(anyhow!("Unable to determine app data dir!"))
     }
 }
 impl AppData {
@@ -67,9 +67,9 @@ pub(crate) struct CacheConfig();
 impl ConfigPath for CacheConfig {
     /// Get the path to the system data directory (bundled with the binary).
     fn get_root_path() -> Result<PathBuf> {
-        Ok(BaseLocations::proj_dirs()
+        BaseLocations::proj_dirs()
             .map(|d| d.cache_dir().to_owned())
-            .ok_or(anyhow!("Unable to determine cache dir!"))?)
+            .ok_or(anyhow!("Unable to determine cache dir!"))
     }
 }
 impl CacheConfig {

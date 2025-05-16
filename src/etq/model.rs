@@ -277,10 +277,19 @@ impl TagIndex {
             tags_to_locations: TagsToLocations::default(),
         }
     }
-    
+
+    /// The tags that are present in the index.
+    pub fn tags(&self) -> Tags {
+        self.tags_to_locations
+            .inner
+            .keys()
+            .cloned()
+            .collect::<Vec<Tag>>()
+            .into()
+    }
     pub fn add_tag_location(&mut self, tag: &Tag, path: PathBuf, range: TextRange) {
         let entry = self.tags_to_locations.entry(tag.to_owned()).or_default();
-        let location  = TextLocation { path, range };
+        let location = TextLocation { path, range };
         entry.push(&location)
     }
 
@@ -290,12 +299,13 @@ impl TagIndex {
         group_key_constructor: impl Fn(&Captures) -> String,
         description: &str,
     ) -> TagGroups {
-
         let mut groups = HashMap::default();
 
         // uglee
         for (tag, tag_locations) in self.tags_to_locations.clone() {
-            let group_key: TagGroup = group_capture_expression.replace(tag.as_ref(), &group_key_constructor).into();
+            let group_key: TagGroup = group_capture_expression
+                .replace(tag.as_ref(), &group_key_constructor)
+                .into();
             let entry: &mut TagsToLocations = groups.entry(group_key).or_default();
             let _ = entry.insert(tag, tag_locations);
         }
@@ -306,7 +316,6 @@ impl TagIndex {
             description: description.to_owned(),
         }
     }
-
 }
 
 impl Add for TagIndex {
@@ -341,9 +350,43 @@ impl Add for TagIndex {
     From,
     FromStr,
 )]
+#[as_ref(str, [u8], String)]
 #[serde(transparent)]
 pub struct Tag {
     inner: String,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Default,
+    IntoIterator,
+    From,
+    AsRef,
+    Deref,
+    DerefMut,
+    PartialEq,
+    Eq,
+)]
+#[deref(forward)]
+#[deref_mut(forward)]
+#[as_ref(forward)]
+pub struct Tags(Vec<Tag>);
+impl Tags {
+    pub fn push(&mut self, value: Tag) {
+        self.0.push(value)
+    }
+    pub fn append(&mut self, mut value: Tags) {
+        self.0.append(&mut value.0)
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Newtype wrapper around a vec of TextRanges.
