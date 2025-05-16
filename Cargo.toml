@@ -12,7 +12,6 @@ linfa = { version = "0.7.1", features = ["ndarray-linalg", "serde"] }
 linfa-clustering = { version = "0.7.1", features = ["serde"] }
 ndarray = { version = "0.15.6", features = ["blas", "serde"] }
 ndarray-linalg = { version = "0.16.0", features = ["openblas-system"] }
-plotters = "0.3.7"
 pulldown-cmark = { version = "0.13.0", features = ["serde", "simd"] }
 regex = "1.11.1"
 rust-bert = "0.23.0"
