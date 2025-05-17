@@ -16,23 +16,100 @@ use anyhow::{Result, anyhow};
 
 use super::model::{Tag, Tags};
 
-/// Newtype wrapper around Embeddings.
-#[derive(Debug, Clone, From, Serialize, Deserialize, IntoIterator, PartialEq)]
-#[serde(transparent)]
-pub struct Embeddings(Vec<Vec<f32>>);
+/// Generate embeddings for a slice of things that can be turned into strs.
+/// - [`tags`] tags (which may be tags, or may be other things) for which the embeddings
+///   should be generated.
+/// - [`device`] the GPU device to use.
+/// - [`model_type`] The model type to use. Note that this is a mirror of the
+///   [`rust_bert::pipelines::sentence_embeddings`] model type, instead of the
+///   real thing, because as a foreign enum the latter doesn't play nicely with
+///   the type system.
+pub fn generate_embeddings<S>(
+    tags: &[S],
+    device: Device,
+    model_type: SentenceEmbeddingsModelType,
+) -> Result<Embeddings>
+where
+    S: AsRef<str> + Send + Sync,
+{
+    let model = sentence_embeddings::SentenceEmbeddingsBuilder::remote(model_type.into())
+        .with_device(device)
+        .create_model()
+        .expect("Failed to load embedding model");
+    model.encode(tags).map(|e| e.into()).map_err(|e| e.into())
+}
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, From, Into)]
+/// Given a [`Tags`] collection, calculate embeddings using the given [`SentenceEmbeddingsModelType`] executing
+/// on the given [`Device`], cluster using `DBSCAN` with the given `min_points` and `tolerance` hyperparameters.
+/// - `tags`: The [`Tags`] instance whose contents should be clustered.
+/// - `device`: The GPU device to use for embeddings.
+/// - `model_type`: The [`SentenceEmbeddingsModelType`] to use for embeddings.
+/// - `min_tags_per_cluster`: The minimum number of tags a cluster can have.
+/// - `tolerance`: The `tolerance` hyperparameter to the `DBSCAN` algorithm.
+pub fn embed_and_cluster_tags(
+    tags: Tags,
+    device: Device,
+    model_type: SentenceEmbeddingsModelType,
+    min_tags_per_cluster: ClusterSize,
+    tolerance: DbscanEpsilon,
+) -> Result<TagClusters> {
+    let normalized_tags = tags.iter().map(|t| t.normalize()).collect::<Vec<String>>();
+    let embeddings = generate_embeddings(&normalized_tags, device, model_type)
+        .with_context(|| "embed_and_cluster_tags()")?;
+    let clusters = cluster_embeddings(&embeddings, min_tags_per_cluster, tolerance)
+        .with_context(|| "embed_and_cluster_tags()")?;
+    Ok((tags, clusters).into())
+}
+
+/// Cluster embeddings using DBSCAN
+/// See: https://rust-ml.github.io/book/4_dbscan.html
+fn cluster_embeddings(
+    embeddings: &Embeddings,
+    min_points: ClusterSize,
+    tolerance: DbscanEpsilon,
+) -> Result<Clusters> {
+    let reshaped_embeddings = embeddings
+        .as_ndarray()
+        .with_context(|| "cluster_embeddings()")?;
+
+    let cluster_assignments = Dbscan::params(min_points.into())
+        .tolerance(tolerance.into())
+        .transform(&reshaped_embeddings)
+        .with_context(|| "cluster_embeddings()")?;
+
+    let mut clusters = Clusters::default();
+    for (point_idx, cluster_id) in cluster_assignments.iter().enumerate() {
+        clusters.add_cluster_assignment(
+            point_idx,
+            cluster_id.to_owned().unwrap_or(usize::MAX).into(),
+        );
+    }
+    Ok(clusters)
+}
+
+// ========================================================================
+// Types
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, From, Into, Display)]
+#[display("{{ rows:{} columns:{} }}", self.0.0, self.0.1)]
 struct Shape((usize, usize));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, From, Into, IntoIterator)]
 struct FlattenedEmbeddings(Vec<f32>);
 
+/// Newtype wrapper around Embeddings.
+/// Wraps a [`Vec<Vec<f32>>`] for type safety, and associates various utility methods.
+#[derive(Debug, Clone, From, Serialize, Deserialize, IntoIterator, PartialEq)]
+#[serde(transparent)]
+pub struct Embeddings(Vec<Vec<f32>>);
 impl Embeddings {
     /// The shape of this Embeddings instance.
     fn shape(&self) -> Shape {
         (self.0.len(), self.0[0].len()).into()
     }
 
+    /// Flatten the wrapped [`Vec<Vec<f32>>`] into a ['Vec<f32>'] by
+    /// concatenating the columns.
     fn as_flattened_vec(&self) -> FlattenedEmbeddings {
         let v = &self.0;
         v.iter()
@@ -41,15 +118,13 @@ impl Embeddings {
             .into()
     }
 
+    /// Convert this Embeddings into an Array2 suitable for transformation
+    /// by the linfa DBSCAN algorithm.
     fn as_ndarray(&self) -> Result<Array2<f32>> {
         let shape = self.shape();
 
-        Array2::from_shape_vec(shape.0, self.as_flattened_vec().into()).with_context(|| {
-            format!(
-                "Failed to reshape embeddings of shape {0:?} into flattened ndarray",
-                shape
-            )
-        })
+        Array2::from_shape_vec(shape.0, self.as_flattened_vec().into())
+            .with_context(|| format!("Embeddings::as_ndarray, shape: {}", shape))
     }
 
     /// Debugging function: compute the distances between each pair
@@ -60,7 +135,7 @@ impl Embeddings {
 
         let embeddings = self
             .as_ndarray()
-            .with_context(|| "self.as_ndarray failed.")?;
+            .with_context(|| "Embeddings::compute_pairwise_distances()")?;
 
         let n = embeddings.nrows();
         let mut distances = Array2::zeros((n, n));
@@ -76,9 +151,11 @@ impl Embeddings {
 
 /// Trait for types from which we want to generate embeddings.
 pub trait Normalizable {
-    /// Lowercase the tag
+    /// Method called by `normalize()` prior to lowercasing and removing
+    /// non-alpha characters.
     fn pre_normalize(&self) -> &str;
 
+    /// Lowercases and removes non-alpha characters from the string.
     fn normalize(&self) -> String {
         self.pre_normalize()
             .to_lowercase()
@@ -225,57 +302,6 @@ impl TagClusters {
     }
 }
 
-/// Generate embeddings for a slice of things that can be turned into strs.
-/// - [`tags`] tags (which may be tags, or may be other things) for which the embeddings
-///   should be generated.
-/// - [`device`] the GPU device to use.
-/// - [`model_type`] The model type to use. Note that this is a mirror of the
-///   [`rust_bert::pipelines::sentence_embeddings`] model type, instead of the
-///   real thing, because as a foreign enum the latter doesn't play nicely with
-///   the type system.
-pub fn generate_embeddings<S>(
-    tags: &[S],
-    device: Device,
-    model_type: SentenceEmbeddingsModelType,
-) -> Result<Embeddings>
-where
-    S: AsRef<str> + Send + Sync,
-{
-    let model = sentence_embeddings::SentenceEmbeddingsBuilder::remote(model_type.into())
-        .with_device(device)
-        .create_model()
-        .expect("Failed to load embedding model");
-    model.encode(tags).map(|e| e.into()).map_err(|e| e.into())
-}
-
-/// Cluster embeddings using DBSCAN
-/// See: https://rust-ml.github.io/book/4_dbscan.html
-fn cluster_embeddings(
-    embeddings: &Embeddings,
-    min_points: ClusterSize,
-    tolerance: DbscanEpsilon,
-) -> Result<Clusters> {
-    let reshaped_embeddings = embeddings
-        .as_ndarray()
-        .with_context(|| "embeddings.as_ndarray() failed.")?;
-
-    let cluster_assignments = Dbscan::params(min_points.into())
-        .tolerance(tolerance.into())
-        .transform(&reshaped_embeddings)
-        .with_context(|| "DBSCAN failed.")?;
-
-    let mut clusters = Clusters::default();
-    for (point_idx, cluster_id) in cluster_assignments.iter().enumerate() {
-        clusters.add_cluster_assignment(
-            point_idx,
-            cluster_id.to_owned().unwrap_or(usize::MAX).into(),
-        );
-    }
-    #[cfg(test)]
-    eprintln!("cluster_embeddings() -- clusters:{:#?}\n\n", clusters);
-    Ok(clusters)
-}
-
 /// Newtype for cluster sizes which enforces the invariant that they're >= 2.
 #[derive(
     Debug, Copy, Clone, Hash, PartialEq, Eq, Into, AsRef, Deref, Serialize, Deserialize, Display,
@@ -285,7 +311,11 @@ impl ClusterSize {
     pub const MIN: ClusterSize = ClusterSize(2);
     pub const MAX: ClusterSize = ClusterSize(usize::MAX);
 
-    fn new(size: usize) -> Self {
+    /// Create a new instance given a `usize`, and panic if
+    /// the following invariants are violated:
+    /// - `size >= ClusterSize::MIN`
+    /// - `size <= ClusterSize::MAX`
+    fn new_unchecked(size: usize) -> Self {
         assert!(
             (Self::MIN.0 <= size) && (size <= Self::MAX.0),
             "Invalid value {}; must be {} ≤ N ≤ {}.",
@@ -296,6 +326,10 @@ impl ClusterSize {
         Self(size)
     }
 
+    /// Attempt to create a new instance given a `usize`, and check
+    /// invariants:
+    /// - `size >= ClusterSize::MIN`
+    /// - `size <= ClusterSize::MAX`
     pub fn try_new(size: usize) -> Result<Self> {
         if (size < ClusterSize::MIN.0) || (ClusterSize::MAX.0 < size) {
             Err(anyhow!(
@@ -305,7 +339,7 @@ impl ClusterSize {
                 Self::MAX
             ))
         } else {
-            Ok(Self::new(size))
+            Ok(Self::new_unchecked(size))
         }
     }
 }
@@ -325,7 +359,10 @@ impl TryFrom<usize> for ClusterSize {
 pub struct DbscanEpsilon(f32);
 impl DbscanEpsilon {
     pub const MIN: DbscanEpsilon = DbscanEpsilon(0.0);
-    fn new(value: f32) -> Self {
+
+    /// Attempt to create a new value from the given `f32`.
+    /// Panics if invariants (notably, epsilon >= 0.0) are violated.
+    fn new_unchecked(value: f32) -> Self {
         assert!(
             value >= Self::MIN.0,
             "invalid value {}; must be >= {}",
@@ -334,9 +371,11 @@ impl DbscanEpsilon {
         );
         Self(value)
     }
+    /// Attempt to create a new value from the given `f32`, ensuring
+    /// invariants (notably, epsilon >= 0.0) are observed.
     pub fn try_new(epsilon: f32) -> Result<Self> {
         match epsilon {
-            _ if epsilon >= Self::MIN.0 => Ok(Self::new(epsilon)),
+            _ if epsilon >= Self::MIN.0 => Ok(Self::new_unchecked(epsilon)),
             _ => Err(anyhow!(
                 "invalid value {}; must be >= {}",
                 epsilon,
@@ -352,28 +391,6 @@ impl TryFrom<f32> for DbscanEpsilon {
     fn try_from(value: f32) -> std::result::Result<Self, Self::Error> {
         Self::try_new(value)
     }
-}
-
-/// Given a [`Tags`] collection, calculate embeddings using the given [`SentenceEmbeddingsModelType`] executing
-/// on the given [`Device`], cluster using `DBSCAN` with the given `min_points` and `tolerance` hyperparameters.
-/// - `tags`: The [`Tags`] instance whose contents should be clustered.
-/// - `device`: The GPU device to use for embeddings.
-/// - `model_type`: The [`SentenceEmbeddingsModelType`] to use for embeddings.
-/// - `min_tags_per_cluster`: The minimum number of tags a cluster can have.
-/// - `tolerance`: The `tolerance` hyperparameter to the `DBSCAN` algorithm.
-pub fn embed_and_cluster_tags(
-    tags: Tags,
-    device: Device,
-    model_type: SentenceEmbeddingsModelType,
-    min_tags_per_cluster: ClusterSize,
-    tolerance: DbscanEpsilon,
-) -> Result<TagClusters> {
-    let normalized_tags = tags.iter().map(|t| t.normalize()).collect::<Vec<String>>();
-    let embeddings = generate_embeddings(&normalized_tags, device, model_type)
-        .with_context(|| "embed_and_cluster(): unable to generate embeddings.")?;
-    let clusters = cluster_embeddings(&embeddings, min_tags_per_cluster, tolerance)
-        .with_context(|| "embed_and_cluster(): unable to cluster embeddings.")?;
-    Ok((tags, clusters).into())
 }
 
 // =====================================================================
@@ -490,10 +507,17 @@ mod tests {
 
     #[test]
     fn test_cluster_size_unchecked() {
-        assert_eq!(ClusterSize::new(ClusterSize::MIN.0), ClusterSize::MIN);
-        assert_eq!(ClusterSize::new(ClusterSize::MAX.0), ClusterSize::MAX);
+        assert_eq!(
+            ClusterSize::new_unchecked(ClusterSize::MIN.0),
+            ClusterSize::MIN
+        );
+        assert_eq!(
+            ClusterSize::new_unchecked(ClusterSize::MAX.0),
+            ClusterSize::MAX
+        );
 
-        let result = std::panic::catch_unwind(|| ClusterSize::new(ClusterSize::MIN.0 - 1));
+        let result =
+            std::panic::catch_unwind(|| ClusterSize::new_unchecked(ClusterSize::MIN.0 - 1));
         assert!(result.is_err())
     }
 
@@ -506,13 +530,17 @@ mod tests {
 
     #[test]
     fn test_epsilon_unchecked() {
-        assert_eq!(DbscanEpsilon::new(DbscanEpsilon::MIN.0), DbscanEpsilon::MIN);
         assert_eq!(
-            DbscanEpsilon::new(DbscanEpsilon::MIN.0 + 1.0).0,
+            DbscanEpsilon::new_unchecked(DbscanEpsilon::MIN.0),
+            DbscanEpsilon::MIN
+        );
+        assert_eq!(
+            DbscanEpsilon::new_unchecked(DbscanEpsilon::MIN.0 + 1.0).0,
             DbscanEpsilon::MIN.0 + 1.0
         );
 
-        let result = std::panic::catch_unwind(|| DbscanEpsilon::new(DbscanEpsilon::MIN.0 - 0.1));
+        let result =
+            std::panic::catch_unwind(|| DbscanEpsilon::new_unchecked(DbscanEpsilon::MIN.0 - 0.1));
         assert!(result.is_err());
     }
 
