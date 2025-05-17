@@ -7,7 +7,7 @@ use linfa_clustering::Dbscan;
 use ndarray::prelude::*;
 use rust_bert::pipelines::sentence_embeddings;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, usize};
 use strum::{EnumString, IntoStaticStr};
 use tch::Device;
 
@@ -125,7 +125,6 @@ impl Clusters {
 pub struct ClusterId(usize);
 
 impl ClusterId {
-    
     /// The cluster id assigned to the "noise" cluster by DBSCAN
     pub const NOISE: Self = ClusterId(usize::MAX);
 
@@ -133,7 +132,7 @@ impl ClusterId {
     pub fn is_noise(&self) -> bool {
         *self == Self::NOISE
     }
-    
+
     /// I can't believe it's not noise!
     pub fn is_signal(&self) -> bool {
         !self.is_noise()
@@ -253,15 +252,15 @@ where
 /// See: https://rust-ml.github.io/book/4_dbscan.html
 fn cluster_embeddings(
     embeddings: &Embeddings,
-    min_points: usize,
-    tolerance: f32,
+    min_points: ClusterSize,
+    tolerance: DbscanEpsilon,
 ) -> Result<Clusters> {
     let reshaped_embeddings = embeddings
         .as_ndarray()
         .with_context(|| "embeddings.as_ndarray() failed.")?;
 
-    let cluster_assignments = Dbscan::params(min_points)
-        .tolerance(tolerance)
+    let cluster_assignments = Dbscan::params(min_points.into())
+        .tolerance(tolerance.into())
         .transform(&reshaped_embeddings)
         .with_context(|| "DBSCAN failed.")?;
 
@@ -277,6 +276,84 @@ fn cluster_embeddings(
     Ok(clusters)
 }
 
+/// Newtype for cluster sizes which enforces the invariant that they're >= 2.
+#[derive(
+    Debug, Copy, Clone, Hash, PartialEq, Eq, Into, AsRef, Deref, Serialize, Deserialize, Display,
+)]
+pub struct ClusterSize(usize);
+impl ClusterSize {
+    pub const MIN: ClusterSize = ClusterSize(2);
+    pub const MAX: ClusterSize = ClusterSize(usize::MAX);
+
+    fn new(size: usize) -> Self {
+        assert!(
+            (Self::MIN.0 <= size) && (size <= Self::MAX.0),
+            "Invalid value {}; must be {} ≤ N ≤ {}.",
+            size,
+            Self::MIN,
+            Self::MAX
+        );
+        Self(size)
+    }
+
+    pub fn try_new(size: usize) -> Result<Self> {
+        if (size < ClusterSize::MIN.0) || (ClusterSize::MAX.0 < size) {
+            Err(anyhow!(
+                "Invalid value {}; must be {} ≤ N ≤ {}.",
+                size,
+                Self::MIN,
+                Self::MAX
+            ))
+        } else {
+            Ok(Self::new(size))
+        }
+    }
+}
+
+impl TryFrom<usize> for ClusterSize {
+    type Error = anyhow::Error;
+
+    fn try_from(value: usize) -> std::result::Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+/// Newtype for epsilon (used for DBSCAN tolerance) which enforces the invariant that it's >= 0,0.
+#[derive(
+    Debug, Copy, Clone, PartialEq, PartialOrd, Into, AsRef, Deref, Serialize, Deserialize, Display,
+)]
+pub struct DbscanEpsilon(f32);
+impl DbscanEpsilon {
+    pub const MIN: DbscanEpsilon = DbscanEpsilon(0.0);
+    fn new(value: f32) -> Self {
+        assert!(
+            value >= Self::MIN.0,
+            "invalid value {}; must be >= {}",
+            value,
+            Self::MIN
+        );
+        Self(value)
+    }
+    pub fn try_new(epsilon: f32) -> Result<Self> {
+        match epsilon {
+            _ if epsilon >= Self::MIN.0 => Ok(Self::new(epsilon)),
+            _ => Err(anyhow!(
+                "invalid value {}; must be >= {}",
+                epsilon,
+                Self::MIN
+            )),
+        }
+    }
+}
+
+impl TryFrom<f32> for DbscanEpsilon {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> std::result::Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
 /// Given a [`Tags`] collection, calculate embeddings using the given [`SentenceEmbeddingsModelType`] executing
 /// on the given [`Device`], cluster using `DBSCAN` with the given `min_points` and `tolerance` hyperparameters.
 /// - `tags`: The [`Tags`] instance whose contents should be clustered.
@@ -288,8 +365,8 @@ pub fn embed_and_cluster_tags(
     tags: Tags,
     device: Device,
     model_type: SentenceEmbeddingsModelType,
-    min_tags_per_cluster: usize,
-    tolerance: f32,
+    min_tags_per_cluster: ClusterSize,
+    tolerance: DbscanEpsilon,
 ) -> Result<TagClusters> {
     let normalized_tags = tags.iter().map(|t| t.normalize()).collect::<Vec<String>>();
     let embeddings = generate_embeddings(&normalized_tags, device, model_type)
@@ -301,7 +378,7 @@ pub fn embed_and_cluster_tags(
 
 // =====================================================================
 // =====================================================================
-// 
+//
 //  ____________
 // < utilities! >
 // ------------
@@ -310,7 +387,7 @@ pub fn embed_and_cluster_tags(
 //            (__)\       )\/\
 //                ||----w |
 //                ||     ||
-// 
+//
 
 /// Native enum that maps to a [`SentenceEmbeddingsModelType`].
 /// This mirrors [`SentenceEmbeddingModelType`], but can receive
@@ -383,11 +460,11 @@ mod tests {
     use tch::Device;
 
     use crate::etq::{
-        embeddings::Normalizable,
+        embeddings::{DbscanEpsilon, Normalizable},
         model::{Tag, Tags},
     };
 
-    use super::{SentenceEmbeddingsModelType, embed_and_cluster_tags};
+    use super::{ClusterSize, SentenceEmbeddingsModelType, embed_and_cluster_tags};
 
     #[test]
     fn test_normalize_tag() {
@@ -399,6 +476,44 @@ mod tests {
 
         let tag = Tag::from_str("foo").unwrap();
         assert_eq!(tag.normalize(), "foo");
+    }
+
+    #[test]
+    fn test_cluster_size_checked() {
+        assert!(ClusterSize::try_new(2).is_ok());
+        assert!(ClusterSize::try_new(1000).is_ok());
+        assert!(ClusterSize::try_new(ClusterSize::MAX.into()).is_ok());
+        assert!(ClusterSize::try_new(ClusterSize::MIN.into()).is_ok());
+        assert!(ClusterSize::try_new(ClusterSize::MIN.0 - 1).is_err());
+        assert!(ClusterSize::try_new(0).is_err());
+    }
+
+    #[test]
+    fn test_cluster_size_unchecked() {
+        assert_eq!(ClusterSize::new(ClusterSize::MIN.0), ClusterSize::MIN);
+        assert_eq!(ClusterSize::new(ClusterSize::MAX.0), ClusterSize::MAX);
+
+        let result = std::panic::catch_unwind(|| ClusterSize::new(ClusterSize::MIN.0 - 1));
+        assert!(result.is_err())
+    }
+
+    #[test]
+    fn test_epsilon_checked() {
+        assert!(DbscanEpsilon::try_new(1.0).is_ok());
+        assert!(DbscanEpsilon::try_new(DbscanEpsilon::MIN.into()).is_ok());
+        assert!(DbscanEpsilon::try_new(DbscanEpsilon::MIN.0 - 0.1).is_err());
+    }
+
+    #[test]
+    fn test_epsilon_unchecked() {
+        assert_eq!(DbscanEpsilon::new(DbscanEpsilon::MIN.0), DbscanEpsilon::MIN);
+        assert_eq!(
+            DbscanEpsilon::new(DbscanEpsilon::MIN.0 + 1.0).0,
+            DbscanEpsilon::MIN.0 + 1.0
+        );
+
+        let result = std::panic::catch_unwind(|| DbscanEpsilon::new(DbscanEpsilon::MIN.0 - 0.1));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -548,8 +663,8 @@ mod tests {
             tags.clone(),
             Device::Cpu,
             SentenceEmbeddingsModelType::AllMiniLmL12V2,
-            2,
-            1.05,
+            ClusterSize::MIN,
+            1.05.try_into().expect("Hey bub, this is an invalid ϵ."),
             // 0.968,
         );
 
@@ -560,15 +675,21 @@ mod tests {
             maybe_tag_clusters.is_ok(),
             "Narrator: tag_clusters was not, in fact, ok."
         );
-        
+
         let tag_clusters = maybe_tag_clusters.unwrap();
         assert_eq!(tag_clusters.num_tags(), tags.len());
         assert!(tag_clusters.num_signal_tags() > 0);
         assert!(tag_clusters.noise_proportion() > 0.0);
         assert!(tag_clusters.signal_proportion() > 0.0);
         assert!(!tag_clusters.is_empty());
-        
+
         // Check that none of the clusters is empty.
-        assert_eq!(tag_clusters.into_iter().filter(|(_, v)| v.is_empty()).count(), 0)
+        assert_eq!(
+            tag_clusters
+                .into_iter()
+                .filter(|(_, v)| v.is_empty())
+                .count(),
+            0
+        )
     }
 }

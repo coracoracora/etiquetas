@@ -4,11 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
 use etiquetas::etq::{
-    embeddings::{SentenceEmbeddingsModelType, embed_and_cluster_tags},
+    embeddings::{embed_and_cluster_tags, ClusterSize, DbscanEpsilon, SentenceEmbeddingsModelType},
     mdscanner::{self, ScanEvent, TagsFound},
     model::TagIndex,
 };
@@ -139,8 +139,8 @@ enum Commands {
         max_depth: Option<usize>,
 
         /// The minimum number of members for a cluster.
-        #[arg(short, long, default_value_t = 2)]
-        min_membership: usize,
+        #[arg(short, long, default_value_t = ClusterSize::MIN.into())]
+        min_cluster_size: usize,
 
         /// The tolerance (or epsilon) hyperparameter for
         /// the DBSCAN algorithm.
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
             follow_symlinks,
             tag_pattern,
             max_depth,
-            min_membership,
+            min_cluster_size,
             tolerance,
             model,
         } => {
@@ -212,7 +212,7 @@ fn main() -> Result<()> {
                 include_dotfiles,
                 *max_depth,
                 0,
-                *min_membership,
+                *min_cluster_size,
                 *tolerance,
                 *model,
             )
@@ -235,10 +235,12 @@ fn handle_cluster_cmd(
     include_dotfiles: IncludeDotfilesFlag,
     max_depth: Option<usize>,
     parent_scan_depth: usize,
-    min_membership: usize,
+    min_cluster_size: usize,
     tolerance: f32,
     model_type: SentenceEmbeddingsModelType,
 ) -> Result<()> {
+    let min_cluster_size = ClusterSize::try_new(min_cluster_size).with_context(|| "min-cluster-size")?;
+    let tolerance = DbscanEpsilon::try_new(tolerance).with_context(|| "tolerance")?;
     let tags = scan_path(
         Path::new(path_str),
         re,
@@ -252,7 +254,7 @@ fn handle_cluster_cmd(
         tags,
         tch::Device::Cpu,
         model_type,
-        min_membership,
+        min_cluster_size,
         tolerance,
     )?;
     println!("{}", clusters);
