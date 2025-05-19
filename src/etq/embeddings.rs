@@ -7,7 +7,7 @@ use linfa_clustering::Dbscan;
 use ndarray::prelude::*;
 use rust_bert::pipelines::sentence_embeddings;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, usize};
+use std::{collections::HashMap, path::PathBuf};
 use strum::{EnumString, IntoStaticStr};
 use tch::Device;
 
@@ -317,7 +317,7 @@ impl ClusterSize {
     /// - `size <= ClusterSize::MAX`
     fn new_unchecked(size: usize) -> Self {
         assert!(
-            (Self::MIN.0 <= size) && (size <= Self::MAX.0),
+            (Self::MIN.0..=Self::MAX.0).contains(&size),
             "Invalid value {}; must be {} ≤ N ≤ {}.",
             size,
             Self::MIN,
@@ -331,7 +331,7 @@ impl ClusterSize {
     /// - `size >= ClusterSize::MIN`
     /// - `size <= ClusterSize::MAX`
     pub fn try_new(size: usize) -> Result<Self> {
-        if (size < ClusterSize::MIN.0) || (ClusterSize::MAX.0 < size) {
+        if !(Self::MIN.0..=Self::MAX.0).contains(&size) {
             Err(anyhow!(
                 "Invalid value {}; must be {} ≤ N ≤ {}.",
                 size,
