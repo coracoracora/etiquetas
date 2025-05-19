@@ -21,7 +21,7 @@ I use this to accompany [Notebooks](https://www.notebooksapp.com), which is my p
 - A mechanism for managing tags in documents... correcting, coalescing, etc.
 - Embeddings-based semiautomatic tag coalescing, tag suggestions, etc.
 
-## How I work with tags curently
+## How I work with tags currently
 
 Each tag pattern has:
 - Sigil (e.g. `#`, `@`, etc)
@@ -33,8 +33,59 @@ Each tag pattern has:
 - `#fg::cat::behavioral` : A category related to behavior
 - `#fg::pat::fubar` : A #fg::pat::fubar pattern.
 
+## Model
 
-  
-  
-  
-  
+```mermaid
+
+classDiagram
+
+    class TagIndex {
+        -PathBuf root_path
+        -TagsToLocations tags_to_locations
+        +new() : TagIndex
+        -tags() : Tags
+        -add_tag_location(tag, path)
+    }
+    
+    class Tags {
+        -inner: Vec~Tag~
+    }
+    
+    class TagsToLocations {
+        -inner HashMap~Tag, TagLocations~
+    }
+    
+    class TagLocations {
+        -inner: Vec~TagLocation~
+    }
+    
+    class TagLocation {
+        -path: PathBuf
+        -tag_found: TagFound
+    }
+
+    class TagFound {
+        -tag: Tag
+        -range_in_body: StrRange
+        -range_in_text: StrRange
+        -in_heading: Option~FrozenHeading~
+    }
+    
+    class StrRange {
+        -inner: Range~usize~
+        -start() : usize
+        -end() : usize
+    }
+    
+    TagIndex *-- TagsToLocations
+    TagIndex *-- PathBuf
+    Tags o-- Tag
+    TagsToLocations o-- Tag
+    TagsToLocations *-- TagLocations
+    TagLocations *-- TagLocation
+    TagLocation *-- PathBuf
+    TagLocation *-- TagFound
+    TagFound *-- StrRange : range_in_body
+    TagFound *-- StrRange : range_in_text
+
+```
