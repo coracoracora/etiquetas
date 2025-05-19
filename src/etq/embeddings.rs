@@ -52,13 +52,21 @@ pub fn embed_and_cluster_tags(
     model_type: SentenceEmbeddingsModelType,
     min_tags_per_cluster: ClusterSize,
     tolerance: DbscanEpsilon,
-) -> Result<TagClusters> {
+) -> Result<ClusteringProduct> {
     let normalized_tags = tags.iter().map(|t| t.normalize()).collect::<Vec<String>>();
     let embeddings = generate_embeddings(&normalized_tags, device, model_type)
         .with_context(|| "embed_and_cluster_tags()")?;
     let clusters = cluster_embeddings(&embeddings, min_tags_per_cluster, tolerance)
         .with_context(|| "embed_and_cluster_tags()")?;
-    Ok((tags, clusters).into())
+
+    let result = ClusteringProduct {
+        provenance: ClusterProvenance {
+            cluster_algorithm: ClusterAlgorithmProvenance::Dbscan(min_tags_per_cluster, tolerance),
+            embeddings_model: EmbeddingsProvenance::SentenceEmbeddings(model_type),
+        },
+        clusters: (tags, clusters).into(),
+    };
+    Ok(result)
 }
 
 /// Cluster embeddings using DBSCAN
@@ -198,6 +206,8 @@ impl Clusters {
     Deref,
     DerefMut,
     Display,
+    Serialize,
+    Deserialize,
 )]
 pub struct ClusterId(usize);
 
@@ -216,8 +226,146 @@ impl ClusterId {
     }
 }
 
+/// Provenance of the embeddings model used to generate the clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum EmbeddingsProvenance {
+    /// The provenance of the embeddings used to generate the clusters.
+    /// This is a placeholder for now, but could be expanded in the future.
+    SentenceEmbeddings(SentenceEmbeddingsModelType),
+}
+
+impl std::fmt::Display for EmbeddingsProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmbeddingsProvenance::SentenceEmbeddings(sentence_embeddings_model_type) => {
+                write!(f, "{:?}", sentence_embeddings_model_type)
+            }
+        }
+    }
+}
+
+/// Provenance of the embeddings model used to generate the clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum ClusterAlgorithmProvenance {
+    /// The provenance of the clustering algorithm used to generate the clusters.
+    Dbscan(ClusterSize, DbscanEpsilon),
+}
+
+impl std::fmt::Display for ClusterAlgorithmProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClusterAlgorithmProvenance::Dbscan(cluster_size, dbscan_epsilon) => {
+                write!(
+                    f,
+                    "DBSCAN (cluster_size: {}, epsilon: {})",
+                    cluster_size, dbscan_epsilon
+                )
+            }
+        }
+    }
+}
+
+/// Provenance of the clustering operation. Describes the algorithm
+/// and embeddings model used to generate the clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct ClusterProvenance {
+    cluster_algorithm: ClusterAlgorithmProvenance,
+    embeddings_model: EmbeddingsProvenance,
+}
+
+impl std::fmt::Display for ClusterProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Model: {}; Clustering Algorithm: {}",
+            self.embeddings_model, self.cluster_algorithm
+        )
+    }
+}
+
+/// The official result from a clustering operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, IntoIterator)]
+pub struct ClusteringProduct {
+    provenance: ClusterProvenance,
+    #[into_iterator]
+    clusters: TagClusters,
+}
+
+impl ClusteringProduct {
+    pub fn is_empty(&self) -> bool {
+        self.clusters.is_empty()
+    }
+
+    /// True if we have at least one non-noise cluster.
+    pub fn has_signal(&self) -> bool {
+        self.clusters.has_signal()
+    }
+
+    /// Total number of clusters contained
+    pub fn num_clusters(&self) -> usize {
+        self.clusters.num_clusters()
+    }
+
+    /// Number of signal clusters contained
+    pub fn num_signal_clusters(&self) -> usize {
+        self.clusters.num_signal_clusters()
+    }
+
+    /// Number of tags contained
+    pub fn num_tags(&self) -> usize {
+        self.clusters.num_tags()
+    }
+
+    /// Number of non-noise tags contained
+    pub fn num_signal_tags(&self) -> usize {
+        self.clusters.num_signal_tags()
+    }
+
+    /// Proportion of signal tags to tag population.
+    pub fn signal_proportion(&self) -> f32 {
+        self.clusters.signal_proportion()
+    }
+
+    /// Proportion of noise tags to tag population
+    pub fn noise_proportion(&self) -> f32 {
+        1.0 - self.clusters.noise_proportion()
+    }
+}
+
+impl std::fmt::Display for ClusteringProduct {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Provenance:                 {}", self.provenance)?;
+        writeln!(f, "Stats")?;
+        writeln!(f, "- Cluster Count:              {}", self.num_clusters())?;
+        writeln!(
+            f,
+            "- Cluster Count (Signal):     {}",
+            self.num_signal_clusters()
+        )?;
+        writeln!(
+            f,
+            "- Cluster Count (Noise):      {}",
+            self.num_clusters() - self.num_signal_clusters()
+        )?;
+        writeln!(f, "- Tag Count:                  {}", self.num_tags())?;
+        writeln!(
+            f,
+            "- Tag Count (Signal):         {}",
+            self.num_signal_tags()
+        )?;
+        writeln!(
+            f,
+            "- Tag Count (Noise):          {}",
+            self.num_tags() - self.num_signal_tags()
+        )?;
+        writeln!(f, "------------------------------------")?;
+        writeln!(f, "Clusters")?;
+        writeln!(f, "{}", self.clusters)
+    }
+}
+
 /// Represents a mapping of clusters to the [`Tag`] instances they contain.
-#[derive(Debug, Clone, PartialEq, IntoIterator, From, Into, Default)]
+#[derive(Debug, Clone, PartialEq, IntoIterator, From, Into, Default, Serialize, Deserialize)]
 pub struct TagClusters(HashMap<ClusterId, Tags>);
 
 impl From<(Tags, Clusters)> for TagClusters {

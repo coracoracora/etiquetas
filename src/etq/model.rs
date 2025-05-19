@@ -10,7 +10,7 @@ use derive_more::{AsRef, Deref, DerefMut, Display, From, FromStr, Index, IndexMu
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
-use super::mdscanner::TagFound;
+use super::{embeddings::ClusteringProduct, mdscanner::TagFound};
 
 /// Represents a location of something in a file, at a byte range (verify... maybe codepoint?)
 #[derive(Debug, Display, Clone, PartialEq, Hash, Serialize, Deserialize)]
@@ -243,7 +243,29 @@ impl Display for TagGroups {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Display)]
+#[display("{}\n\n{}", tag_index, clusters)]
+pub struct ClusteredTagIndex {
+    pub tag_index: TagIndex,
+    pub clusters: ClusteringProduct,
+}
+
+impl ClusteredTagIndex {
+    pub fn new(tag_index: TagIndex, clusters: ClusteringProduct) -> Self {
+        Self {
+            tag_index,
+            clusters,
+        }
+    }
+
+    pub fn tags(&self) -> Tags {
+        self.tag_index.tags()
+    }
+
+}
+
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TagIndex {
     // Toplevel path
     pub root_path: PathBuf,

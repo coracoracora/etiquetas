@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use derive_more::{Display, From};
 use etiquetas::etq::{
-    embeddings::{embed_and_cluster_tags, ClusterSize, DbscanEpsilon, SentenceEmbeddingsModelType},
+    embeddings::{ClusterSize, DbscanEpsilon, SentenceEmbeddingsModelType, embed_and_cluster_tags},
     mdscanner::{self, ScanEvent, TagsFound},
-    model::TagIndex,
+    model::{ClusteredTagIndex, TagIndex},
 };
 use pulldown_cmark::{Event, Parser as MDParser, TextMergeWithOffset};
 use regex::Regex;
@@ -239,25 +239,31 @@ fn handle_cluster_cmd(
     tolerance: f32,
     model_type: SentenceEmbeddingsModelType,
 ) -> Result<()> {
-    let min_cluster_size = ClusterSize::try_new(min_cluster_size).with_context(|| "min-cluster-size")?;
+    let min_cluster_size =
+        ClusterSize::try_new(min_cluster_size).with_context(|| "min-cluster-size")?;
     let tolerance = DbscanEpsilon::try_new(tolerance).with_context(|| "tolerance")?;
-    let tags = scan_path(
+
+    // Index all of the tags in the path
+    let tag_index = scan_path(
         Path::new(path_str),
         re,
         follow_symlinks,
         include_dotfiles,
         max_depth,
         parent_scan_depth,
-    )?
-    .tags();
+    )?;
+
     let clusters = embed_and_cluster_tags(
-        tags,
+        tag_index.tags(),
         tch::Device::Cpu,
         model_type,
         min_cluster_size,
         tolerance,
     )?;
-    println!("{}", clusters);
+
+    let clustered_idx = ClusteredTagIndex::new(tag_index, clusters);
+
+    println!("{}", clustered_idx);
     Ok(())
 }
 
