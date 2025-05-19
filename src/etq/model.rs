@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fmt::Display,
     ops::{Add, Range},
@@ -9,78 +10,83 @@ use derive_more::{AsRef, Deref, DerefMut, Display, From, FromStr, Index, IndexMu
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
-/// Represents a location of a tag in a file, at a byte range (verify... maybe codepoint?)
-#[derive(Default, Debug, Display, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[display("{}@{}", self.path.display(), self.range)]
-pub struct TextLocation {
+use super::mdscanner::TagFound;
+
+/// Represents a location of something in a file, at a byte range (verify... maybe codepoint?)
+#[derive(Debug, Display, Clone, PartialEq, Hash, Serialize, Deserialize)]
+#[display("{}@{}", self.path.display(), self.text_range_in_file())]
+pub struct TagLocation {
+    /// The path to the file containing whatever is being located.
     path: PathBuf,
-    range: TextRange,
+
+    tag_found: TagFound,
 }
 
-impl TextLocation {
-    pub fn new<P, L>(into_pathbuf: P, into_range: L) -> Self
+impl TagLocation {
+    pub fn new<P>(into_pathbuf: P, tag_found: TagFound) -> Self
     where
         P: Into<PathBuf>,
-        L: Into<TextRange>,
     {
         Self {
             path: into_pathbuf.into(),
-            range: into_range.into(),
+            tag_found,
         }
     }
 }
 
-impl<P, L> From<(P, L)> for TextLocation
-where
-    P: Into<PathBuf>,
-    L: Into<TextRange>,
-{
-    fn from(value: (P, L)) -> Self {
-        Self::new(value.0, value.1)
+impl TagLocation {
+    /// The range of the tag in the file.
+    pub fn text_range_in_file(&self) -> StrRange {
+        self.tag_found.range_in_body.clone()
+    }
+
+    /// The range of the tag in the context.
+    pub fn text_range_in_context(&self) -> StrRange {
+        self.tag_found.range_in_text.clone()
     }
 }
 
 /// Represents a collection of tag file locations.
 #[derive(Default, Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TextLocations {
-    inner: Vec<TextLocation>,
+pub struct TagLocations {
+    inner: Vec<TagLocation>,
 }
 
-impl From<Vec<TextLocation>> for TextLocations {
-    fn from(value: Vec<TextLocation>) -> Self {
+impl From<Vec<TagLocation>> for TagLocations {
+    fn from(value: Vec<TagLocation>) -> Self {
         Self { inner: value }
     }
 }
 
-impl IntoIterator for TextLocations {
-    type Item = TextLocation;
-    type IntoIter = std::vec::IntoIter<TextLocation>;
+impl IntoIterator for TagLocations {
+    type Item = TagLocation;
+    type IntoIter = std::vec::IntoIter<TagLocation>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.into_iter()
     }
 }
 
-impl<'a> IntoIterator for &'a TextLocations {
-    type Item = &'a TextLocation;
-    type IntoIter = std::slice::Iter<'a, TextLocation>;
+impl<'a> IntoIterator for &'a TagLocations {
+    type Item = &'a TagLocation;
+    type IntoIter = std::slice::Iter<'a, TagLocation>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter()
     }
 }
 
-impl<'a> IntoIterator for &'a mut TextLocations {
-    type Item = &'a mut TextLocation;
-    type IntoIter = std::slice::IterMut<'a, TextLocation>;
+impl<'a> IntoIterator for &'a mut TagLocations {
+    type Item = &'a mut TagLocation;
+    type IntoIter = std::slice::IterMut<'a, TagLocation>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter_mut()
     }
 }
 
-impl TextLocations {
+impl TagLocations {
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -88,11 +94,11 @@ impl TextLocations {
         self.inner.is_empty()
     }
 
-    pub fn push(&mut self, value: &TextLocation) {
+    pub fn push(&mut self, value: &TagLocation) {
         self.inner.push(value.clone())
     }
 
-    pub fn append(&mut self, value: &mut TextLocations) {
+    pub fn append(&mut self, value: &mut TagLocations) {
         self.inner.append(&mut value.inner)
     }
 }
@@ -101,18 +107,18 @@ impl TextLocations {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TagsToLocations {
-    inner: HashMap<Tag, TextLocations>,
+    inner: HashMap<Tag, TagLocations>,
 }
 
-impl From<HashMap<Tag, TextLocations>> for TagsToLocations {
-    fn from(value: HashMap<Tag, TextLocations>) -> Self {
+impl From<HashMap<Tag, TagLocations>> for TagsToLocations {
+    fn from(value: HashMap<Tag, TagLocations>) -> Self {
         Self { inner: value }
     }
 }
 
 impl IntoIterator for TagsToLocations {
-    type Item = (Tag, TextLocations);
-    type IntoIter = std::collections::hash_map::IntoIter<Tag, TextLocations>;
+    type Item = (Tag, TagLocations);
+    type IntoIter = std::collections::hash_map::IntoIter<Tag, TagLocations>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.into_iter()
@@ -120,8 +126,8 @@ impl IntoIterator for TagsToLocations {
 }
 
 impl<'a> IntoIterator for &'a TagsToLocations {
-    type Item = (&'a Tag, &'a TextLocations);
-    type IntoIter = std::collections::hash_map::Iter<'a, Tag, TextLocations>;
+    type Item = (&'a Tag, &'a TagLocations);
+    type IntoIter = std::collections::hash_map::Iter<'a, Tag, TagLocations>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter()
@@ -129,8 +135,8 @@ impl<'a> IntoIterator for &'a TagsToLocations {
 }
 
 impl<'a> IntoIterator for &'a mut TagsToLocations {
-    type Item = (&'a Tag, &'a mut TextLocations);
-    type IntoIter = std::collections::hash_map::IterMut<'a, Tag, TextLocations>;
+    type Item = (&'a Tag, &'a mut TagLocations);
+    type IntoIter = std::collections::hash_map::IterMut<'a, Tag, TagLocations>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter_mut()
@@ -144,19 +150,19 @@ impl TagsToLocations {
         }
     }
 
-    pub fn insert(&mut self, key: Tag, value: TextLocations) -> Option<TextLocations> {
+    pub fn insert(&mut self, key: Tag, value: TagLocations) -> Option<TagLocations> {
         self.inner.insert(key, value)
     }
 
-    pub fn entry(&mut self, key: Tag) -> std::collections::hash_map::Entry<Tag, TextLocations> {
+    pub fn entry(&mut self, key: Tag) -> std::collections::hash_map::Entry<Tag, TagLocations> {
         self.inner.entry(key)
     }
 
-    pub fn get(&self, key: &Tag) -> Option<&TextLocations> {
+    pub fn get(&self, key: &Tag) -> Option<&TagLocations> {
         self.inner.get(key)
     }
 
-    pub fn keys(&self) -> std::collections::hash_map::Keys<Tag, TextLocations> {
+    pub fn keys(&self) -> std::collections::hash_map::Keys<Tag, TagLocations> {
         self.inner.keys()
     }
 
@@ -222,13 +228,13 @@ impl Display for TagGroups {
             writeln!(f, "📦  {} ({}):", group_key, group.len())?;
             for (tag, locs) in group {
                 writeln!(f, "      |__ 🏷️  {} ({})", tag, locs.len())?;
-                for TextLocation { path, range } in locs {
+                for TagLocation { path, tag_found } in locs {
                     writeln!(
                         f,
                         "      |    |__ 📄 {}:{}..{}",
                         path.display(),
-                        range.start(),
-                        range.end(),
+                        tag_found.range_in_body.start(),
+                        tag_found.range_in_body.end(),
                     )?;
                 }
             }
@@ -251,14 +257,14 @@ impl Display for TagIndex {
         writeln!(f, "{}:", self.root_path.display())?;
         for (tag, locs) in &self.tags_to_locations {
             writeln!(f, "  🏷️  {}", tag)?;
-            for TextLocation { path, range } in locs.clone() {
+            for TagLocation { path, tag_found } in locs.clone() {
                 // hacky
                 writeln!(
                     f,
                     "     |__ 📄 {}:{}..{}",
                     path.display(),
-                    range.start(),
-                    range.end(),
+                    tag_found.range_in_body.start(),
+                    tag_found.range_in_body.end(),
                 )?;
             }
         }
@@ -287,9 +293,15 @@ impl TagIndex {
             .collect::<Vec<Tag>>()
             .into()
     }
-    pub fn add_tag_location(&mut self, tag: &Tag, path: PathBuf, range: TextRange) {
-        let entry = self.tags_to_locations.entry(tag.to_owned()).or_default();
-        let location = TextLocation { path, range };
+    pub fn add_tag_location(&mut self, path: PathBuf, tag_found: TagFound) {
+        let entry = self
+            .tags_to_locations
+            .entry(tag_found.tag.to_owned())
+            .or_default();
+        let location = TagLocation {
+            path,
+            tag_found,
+        };
         entry.push(&location)
     }
 
@@ -406,11 +418,11 @@ impl Tags {
 #[deref(forward)]
 #[deref_mut(forward)]
 pub struct TextRanges {
-    inner: Vec<TextRange>,
+    inner: Vec<StrRange>,
 }
 
 impl TextRanges {
-    pub fn push(&mut self, value: TextRange) {
+    pub fn push(&mut self, value: StrRange) {
         self.inner.push(value)
     }
 
@@ -427,7 +439,25 @@ impl TextRanges {
     }
 }
 
-/// Newtype wrapper around a [`Range<usize>'].
+/// Newtype wrapper around a `Range` that refers to a range of _bytes_,
+/// as opposed to characters. Note that there is no enherent constraint
+/// in the type system that enforces this, however this model introduces
+/// the constraints for clarity.
+///
+/// Under the hood, this is used in two cases:
+/// 1. To represent spans returned by the markdown parser, and
+/// 2. To represent the results of regex matches.
+///
+/// In both cases, the range unit is a `usize` which represents a byte index.
+/// From [`regex::Match`]:
+/// > Since this Match can only be produced by the top-level Regex APIs that only
+/// > support searching UTF-8 encoded strings, the byte offsets for a Match are
+/// > guaranteed to fall on valid UTF-8 codepoint boundaries. That is, slicing a
+/// > &str with Match::range is guaranteed to never panic.
+///
+/// `pullldown_cmark` doesn't document this directly, but as it's just indexing
+/// `str` under the hood, we should be good.
+///
 #[derive(
     Debug,
     Display,
@@ -445,10 +475,10 @@ impl TextRanges {
 )]
 #[display("{}..{}", self.start(), self.end())]
 #[serde(transparent)]
-pub struct TextRange {
+pub struct StrRange {
     inner: Range<usize>,
 }
-impl TextRange {
+impl StrRange {
     /// The start byte of the tag text within its source.
     /// According to the `regex` crate docs:
     ///
@@ -479,4 +509,10 @@ impl TextRange {
     fn end(&self) -> usize {
         self.inner.end
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash)]
+pub struct TextRangeInContext<'a> {
+    range_bytes: Range<usize>,
+    ctx: Cow<'a, str>,
 }

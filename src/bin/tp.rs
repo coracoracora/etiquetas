@@ -372,7 +372,7 @@ fn scan_path(
     if path.is_file() && path.extension().is_some_and(|e| e == "md") {
         let hits = scan_markdown_file(path, re)?;
         for tag in hits.1 {
-            my_tag_index.add_tag_location(&tag.tag, hits.0.clone(), tag.range_in_body);
+            my_tag_index.add_tag_location(hits.0.clone(), tag);
         }
         return Ok(my_tag_index);
     }

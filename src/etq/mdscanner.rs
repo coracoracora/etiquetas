@@ -1,9 +1,10 @@
 use std::{fmt::Display, marker::PhantomData};
 
-use derive_more::IntoIterator;
+use derive_more::{Display, IntoIterator};
 use pulldown_cmark::{Event, HeadingLevel, OffsetIter, Parser, Tag as CMTag, TextMergeWithOffset};
+use serde::{Deserialize, Serialize};
 
-use super::model::{Tag, TextRange};
+use super::model::{Tag, StrRange};
 
 // ==================================================================
 // Event Bookender Typestatey Builder
@@ -82,6 +83,22 @@ impl<'a> From<Event<'a>> for EndEvent {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash, Display)]
+#[display("FrozenHeading {{ level: {}, id: {:?}, classes: {:?}, attrs: {:?}, text: {} }}", level, id, classes, attrs, text)]
+pub struct FrozenHeading {
+    level: HeadingLevel,
+    id: Option<String>,
+    classes: Vec<String>,
+    attrs: Vec<(String, Option<String>)>,
+    text: String,
+}
+
+impl From<Heading> for FrozenHeading {
+    fn from(value: Heading) -> Self {
+        value.frozen()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Heading {
     pub start_event: StartEvent,
@@ -111,6 +128,22 @@ impl std::hash::Hash for Heading {
 }
 
 impl Heading {
+
+    /// Freeze this heading into something that is owned and can be serialized.
+    pub fn frozen(&self) -> FrozenHeading {
+        FrozenHeading {
+            level: self.level(),
+            id: self.id().map(|s| s.to_string()),
+            classes: self.classes().iter().map(|s| s.to_string()).collect(),
+            attrs: self
+                .attrs()
+                .iter()
+                .map(|s| (s.0.to_string(), s.1.clone().map(|e| e.to_string())))
+                .collect(),
+            text: self.text().unwrap_or("<empty>".to_string()),
+        }
+    }
+
     /// Returns the level of thi sheading.
     pub fn level(&self) -> HeadingLevel {
         if let Event::Start(CMTag::Heading {
@@ -179,11 +212,10 @@ impl Heading {
     /// Finds the first [`Event::Text`] in inter_events, if any, converts it,
     /// and returns it.
     pub fn text(&self) -> Option<String> {
-        let ret = self.inter_events.iter().find_map(|e| match e.0 {
+        self.inter_events.iter().find_map(|e| match e.0 {
             Event::Text(ref t) => Some(t.to_string()),
             _ => None,
-        });
-        ret
+        })
     }
 }
 
@@ -192,16 +224,6 @@ struct HeadingBuilder<T: EventGroupMember> {
     inter_events: Vec<InterEvent>,
     phantom: PhantomData<T>,
 }
-
-// impl HeadingBuilder<StartEvent> {
-//     fn start(start_event: StartEvent) -> HeadingBuilder<InterEvent> {
-//         HeadingBuilder {
-//             start_event,
-//             inter_events: Vec::<InterEvent>::default(),
-//             phantom: PhantomData,
-//         }
-//     }
-// }
 
 impl HeadingBuilder<InterEvent> {
     /// Restart the build process.
@@ -230,23 +252,23 @@ impl HeadingBuilder<InterEvent> {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq)]
+#[derive(Debug, Clone, Hash, PartialEq, Serialize, Deserialize)]
 pub struct TagFound {
     /// The tag found
     pub tag: Tag,
 
     // pub last_heading_seen: String,
     /// The range of the tag, in bytes, with respect to the body of the content being parsed.
-    pub range_in_body: TextRange,
+    pub range_in_body: StrRange,
 
     /// Text
     pub found_in_text: String,
 
     /// The range of the tag, in bytes, in the element.
-    pub range_in_text: TextRange,
+    pub range_in_text: StrRange,
 
     /// The heading in which the tag was found
-    pub in_heading: Option<Heading>,
+    pub in_heading: Option<FrozenHeading>,
 }
 
 impl Display for TagFound {
@@ -314,7 +336,7 @@ pub enum ScanEvent {
 #[derive(Debug)]
 pub struct MarkdownScanner<'a, M, I>
 where
-    I: IntoIterator<Item = (Tag, TextRange)>,
+    I: IntoIterator<Item = (Tag, StrRange)>,
     M: FnMut(&str) -> I,
 {
     parser: TextMergeWithOffset<'a, OffsetIter<'a>>,
@@ -326,7 +348,7 @@ where
 impl<'a, M, I> MarkdownScanner<'a, M, I>
 where
     M: FnMut(&str) -> I,
-    I: IntoIterator<Item = (Tag, TextRange)>,
+    I: IntoIterator<Item = (Tag, StrRange)>,
 {
     pub fn new(input: &'a str, matcher: M) -> Self {
         Self {
@@ -341,7 +363,7 @@ where
 impl<M, I> Iterator for MarkdownScanner<'_, M, I>
 where
     M: FnMut(&str) -> I,
-    I: IntoIterator<Item = (Tag, TextRange)>,
+    I: IntoIterator<Item = (Tag, StrRange)>,
 {
     type Item = ScanEvent;
 
@@ -364,7 +386,7 @@ where
                     if let Some(ref mut hb) = heading_builder {
                         let _ = hb.add_inter(event.into());
                     } else {
-                        let context_range_in_body: TextRange = range.into();
+                        let context_range_in_body: StrRange = range.into();
                         let mut matches: TagsFound = (self.matcher)(cow_str)
                             .into_iter()
                             .map(|(t, r)| TagFound {
@@ -372,7 +394,7 @@ where
                                 range_in_body: context_range_in_body.clone(),
                                 found_in_text: cow_str.clone().into(),
                                 range_in_text: r,
-                                in_heading: self.last_heading.clone(),
+                                in_heading: self.last_heading.as_ref().map(|m| m.frozen()),
                             })
                             .collect();
 
