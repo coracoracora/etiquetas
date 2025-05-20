@@ -255,7 +255,7 @@ fn handle_cluster_cmd(
 
     let clusters = embed_and_cluster_tags(
         tag_index.tags(),
-        tch::Device::Cpu,
+        tch::Device::Mps,
         model_type,
         min_cluster_size,
         tolerance,
