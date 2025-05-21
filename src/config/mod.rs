@@ -17,6 +17,12 @@ pub fn get_or_create_cache_path<P: AsRef<Path>>(subpath: Option<P>) -> Result<Pa
     CacheConfig::get_cache_path(subpath)
 }
 
+pub fn get_or_create_embeddings_cache_path<P: AsRef<Path>>(subpath: Option<P>) -> Result<PathBuf> {
+    let path = PathBuf::from("embeddings");
+    let path = subpath.map(|p| path.join(p)).or(Some(path));
+    CacheConfig::get_cache_path(path)
+}
+
 /// Get or create a subdirectory in the app data dir.
 /// - [`subpath`]: If Some(P), a subdirectory will be created if necessary
 ///   and returned. If None, the root app data directory will be returned.

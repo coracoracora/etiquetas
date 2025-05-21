@@ -7,14 +7,209 @@ use linfa_clustering::Dbscan;
 use ndarray::prelude::*;
 use rust_bert::pipelines::sentence_embeddings;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    iter::zip,
+    path::PathBuf,
+};
 use strum::{EnumString, IntoStaticStr};
 use tch::Device;
+use thiserror::Error;
 
-#[allow(unused_imports)]
 use anyhow::{Result, anyhow};
 
+use crate::config;
+
 use super::model::{Tag, Tags};
+
+/// Given a tag and a model, compute the cache path to which it can be saved, or
+/// from which it could be loaded.
+pub fn make_embeddings_cache_path(
+    tag: &Tag,
+    model: SentenceEmbeddingsModelType,
+) -> Result<PathBuf> {
+    let subpath: PathBuf = model.to_string().into();
+    let subpath = config::get_embeddings_cache_path(Some(subpath))?;
+    Ok(subpath.join(tag.normalize()))
+}
+
+/// An error encountered during embeddings load, generation, or save.
+#[derive(Error, Debug)]
+pub enum EmbeddingsError<'a> {
+    /// There was a problem loading the embeddings. Note, these _will_ be expected
+    /// when we just haven't cached anything.
+    #[error("Unable to load embeddings for {0}, model {1}.")]
+    Load(
+        &'a Tag,
+        SentenceEmbeddingsModelType,
+        #[source] anyhow::Error,
+    ),
+
+    /// There was a problem generating embeddings. These are generally fatal, as
+    /// they most likely mean a problem with the underlying model configuration
+    /// We can quibble about whether these merit a panic, but the invariants
+    /// expected by the underlying library are Important and Mysterious.
+    /// For now, we'll catch them and at least wrap them in context.
+    #[error("Unable to generate embeddings for {0:?}, model {1}, device {2:?}.")]
+    Generate(
+        Tags,
+        SentenceEmbeddingsModelType,
+        Device,
+        #[source] anyhow::Error,
+    ),
+
+    /// There was a problem saving the embeddings for the given tag to the
+    /// cache. We're treating these as fatal for now. In reality, it may be worth
+    /// considring these "recoverable", as if we dont save embeddings then we'll just try
+    /// again the next time we see them.
+    #[error("Unable to save embeddings to {2:?} for {0}, model {1}: {3:?}.")]
+    Save(
+        Tag,
+        SentenceEmbeddingsModelType,
+        Option<PathBuf>,
+        #[source] anyhow::Error,
+    ),
+
+    /// We encountered one or more errors in when loading-or-generating. The vec
+    /// members will actually be one of the above, or [`Unknown(e)`].
+    #[error("Nonzero errors found trying to load or generate embeddings.")]
+    LoadOrGenerate(Box<Vec<EmbeddingsError<'a>>>),
+
+    /// Something happened that the ring did not expect. At the moment, this probably
+    /// means a model error; whatever the cause, it's included.
+    #[error("Unknown embeddings error.")]
+    Unknown(#[from] anyhow::Error),
+}
+
+/// Attempt to save the given embeddings.
+fn try_save_embeddings<'a>(
+    embeddings: TagEmbeddings,
+) -> Result<TagEmbeddings, EmbeddingsError<'a>> {
+    let path = make_embeddings_cache_path(&embeddings.tag, embeddings.model)
+        .with_context(|| "try_save_embeddings(): make embeddings path")
+        .map_err(|e| EmbeddingsError::Save(embeddings.tag.clone(), embeddings.model, None, e))?
+        .with_extension("cbor");
+
+    let writer = File::options()
+        .write(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| "try_save_embeddings(): open for write")
+        .map_err(|e| {
+            EmbeddingsError::Save(
+                embeddings.tag.clone(),
+                embeddings.model,
+                Some(path.clone()),
+                e.into(),
+            )
+        })?;
+
+    ciborium::into_writer(&embeddings, writer)
+        .with_context(|| "try_save_embeddings(): write cbor")
+        .map_err(|e| {
+            EmbeddingsError::Save(
+                embeddings.tag.clone(),
+                embeddings.model,
+                Some(path.clone()),
+                e.into(),
+            )
+        })?;
+
+    Ok(embeddings)
+}
+
+/// Given a tag and a model, attempt to load the associated embeddings from cache.
+fn try_load_embeddings<'a>(
+    tag: &'a Tag,
+    model: SentenceEmbeddingsModelType,
+) -> std::result::Result<TagEmbeddings, EmbeddingsError<'a>> {
+    let path = make_embeddings_cache_path(tag, model)
+        .with_context(|| "try_load_embeddings: make cache path")
+        .map_err(|e| EmbeddingsError::Load(tag, model, e.into()))?
+        .with_extension("cbor");
+
+    let content = fs::read(&path)
+        .with_context(|| "try_load_embeddings(): read data")
+        .map_err(|e| EmbeddingsError::Load(tag, model, e.into()))?;
+
+    ciborium::from_reader(content.as_slice())
+        .with_context(|| "try_load_embeddings(): decode cbor")
+        .map_err(|e| EmbeddingsError::Load(tag, model, e.into()))
+}
+
+/// Given a collection of tags, a model, and a device, attempt to load the embeddings from cache,
+/// and for any that aren't cached, generated and cache them prior to returning.
+/// Embeddings are guaranteed to be in the same order as the tags whence they
+/// were generated.
+pub fn load_or_generate_embeddings<'a>(
+    tags: Tags,
+    model: SentenceEmbeddingsModelType,
+    device: Device,
+) -> std::result::Result<Vec<TagEmbeddings>, EmbeddingsError<'a>> {
+    /*
+    The following monstrosity:
+        1. First, loop through the gags and attempt to load values from disk. Could be concurrent
+           but likely not a huge savings.
+        2. Collect the results, and for the failures, generate embeddings.
+        3. Save the newly generated embeddings
+        4. Coalesce the reified and generated embeddings into a single `Embeddings` instance
+        5. Return it.
+    */
+
+    // First, try to load embeddings
+    let (cached_embeddings, errors): (Vec<_>, Vec<_>) = tags
+        .iter()
+        .map(|t| try_load_embeddings(t, model))
+        .partition(|r| r.is_ok());
+
+    // Now, collect all of the tags that errored.
+    let tags_to_generate = errors
+        .into_iter()
+        .filter_map(|f| match f {
+            Err(EmbeddingsError::Load(tag, _, _)) => Some(tag),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    println!("tags_to_generate: {:#?}", tags_to_generate);
+
+    // Attempt to generate and save embeddings. The generation happens
+    // all at once, so it's all-or nothing. However we still save
+    // one-by-one, which means that we need to first see if we have
+    // any errors and fail fast if we do, otherwise return the reults.
+    let (generated_embeddings, errors): (Vec<_>, Vec<_>) = generate_embeddings(
+        &tags_to_generate
+            .iter()
+            .map(|t| t.normalize())
+            .collect::<Vec<_>>(),
+        device,
+        model,
+    )
+    // For each of these that failed, try to generate embeddings
+    .map(|em| {
+        zip(tags_to_generate, em)
+            .into_iter()
+            .map(|p| TagEmbeddings {
+                tag: p.0.to_owned(),
+                model: model,
+                embeddings: p.1.into(),
+            })
+            .map(|t| try_save_embeddings(t))
+            .partition(|e| e.is_ok())
+    })?;
+
+    match (generated_embeddings, errors) {
+        (_, e) if e.len() > 0 => Err(EmbeddingsError::LoadOrGenerate(Box::new(
+            e.into_iter().filter_map(|f| f.err()).collect(),
+        ))),
+        (emb, _) => Ok(cached_embeddings
+            .into_iter()
+            .filter_map(|f| f.ok())
+            .chain(emb.into_iter().filter_map(|f| f.ok()).map(|f| f.to_owned()))
+            .collect()),
+    }
+}
 
 /// Generate embeddings for a slice of things that can be turned into strs.
 /// - [`tags`] tags (which may be tags, or may be other things) for which the embeddings
@@ -24,19 +219,28 @@ use super::model::{Tag, Tags};
 ///   [`rust_bert::pipelines::sentence_embeddings`] model type, instead of the
 ///   real thing, because as a foreign enum the latter doesn't play nicely with
 ///   the type system.
-pub fn generate_embeddings<S>(
+pub fn generate_embeddings<'a, S>(
     tags: &[S],
     device: Device,
     model_type: SentenceEmbeddingsModelType,
-) -> Result<Embeddings>
+) -> std::result::Result<Embeddings, EmbeddingsError<'a>>
 where
     S: AsRef<str> + Send + Sync,
 {
-    let model = sentence_embeddings::SentenceEmbeddingsBuilder::remote(model_type.into())
-        .with_device(device)
-        .create_model()
-        .expect("Failed to load embedding model");
-    model.encode(tags).map(|e| e.into()).map_err(|e| e.into())
+    if tags.is_empty() {
+        Ok(Embeddings::default())
+    } else {
+        let model = sentence_embeddings::SentenceEmbeddingsBuilder::remote(model_type.into())
+            .with_device(device)
+            .create_model()
+            .expect("Failed to load embedding model");
+
+        model
+            .encode(tags)
+            .map(|e| e.into())
+            .with_context(|| "generate_embedding()/encode")
+            .map_err(|e| e.into())
+    }
 }
 
 /// Given a [`Tags`] collection, calculate embeddings using the given [`SentenceEmbeddingsModelType`] executing
@@ -53,10 +257,13 @@ pub fn embed_and_cluster_tags(
     min_tags_per_cluster: ClusterSize,
     tolerance: DbscanEpsilon,
 ) -> Result<ClusteringProduct> {
-    let normalized_tags = tags.iter().map(|t| t.normalize()).collect::<Vec<String>>();
-    let embeddings = generate_embeddings(&normalized_tags, device, model_type)
-        .with_context(|| "embed_and_cluster_tags()")?;
-    let clusters = cluster_embeddings(&embeddings, min_tags_per_cluster, tolerance)
+    // let normalized_tags = tags.iter().map(|t| t.normalize()).collect::<Vec<String>>();
+    // let embeddings = generate_embeddings(&normalized_tags, device, model_type)
+    //     .with_context(|| "embed_and_cluster_tags()")?;
+    let embeddings = load_or_generate_embeddings(tags, model_type, device)
+        .with_context(|| "embed_and_cluster_tags()")
+        .map_err(|e| anyhow::Error::from(e))?;
+    let clusters = cluster_tag_embeddings(embeddings, min_tags_per_cluster, tolerance)
         .with_context(|| "embed_and_cluster_tags()")?;
 
     let result = ClusteringProduct {
@@ -64,9 +271,26 @@ pub fn embed_and_cluster_tags(
             cluster_algorithm: ClusterAlgorithmProvenance::Dbscan(min_tags_per_cluster, tolerance),
             embeddings_model: EmbeddingsProvenance::SentenceEmbeddings(model_type),
         },
-        clusters: (tags, clusters).into(),
+        clusters: clusters,
     };
     Ok(result)
+}
+
+fn cluster_tag_embeddings(
+    tag_embeddings: Vec<TagEmbeddings>,
+    min_points: ClusterSize,
+    tolerance: DbscanEpsilon,
+) -> Result<TagClusters> {
+    let (tags, embeddings) = tag_embeddings
+        .into_iter()
+        .fold((vec![], vec![]), |mut acc, nxt| {
+            acc.0.push(nxt.tag);
+            acc.1.push(nxt.embeddings);
+            acc
+        });
+
+    let clusters = cluster_embeddings(&embeddings.into(), min_points, tolerance)?;
+    Ok((Tags::from(tags), clusters).into())
 }
 
 /// Cluster embeddings using DBSCAN
@@ -97,6 +321,13 @@ fn cluster_embeddings(
 
 // ========================================================================
 // Types
+//
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TagEmbeddings {
+    tag: Tag,
+    model: SentenceEmbeddingsModelType,
+    embeddings: Embeddings,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, From, Into, Display)]
 #[display("{{ rows:{} columns:{} }}", self.0.0, self.0.1)]
@@ -107,7 +338,7 @@ struct FlattenedEmbeddings(Vec<f32>);
 
 /// Newtype wrapper around Embeddings.
 /// Wraps a [`Vec<Vec<f32>>`] for type safety, and associates various utility methods.
-#[derive(Debug, Clone, From, Serialize, Deserialize, IntoIterator, PartialEq)]
+#[derive(Debug, Clone, From, Serialize, Deserialize, IntoIterator, PartialEq, Default)]
 #[serde(transparent)]
 pub struct Embeddings(Vec<Vec<f32>>);
 impl Embeddings {
@@ -157,6 +388,27 @@ impl Embeddings {
     }
 }
 
+/// Creates a single-column [`Embeddings`] instance
+/// from a [`Vec<f32>`].
+impl From<Vec<f32>> for Embeddings {
+    fn from(value: Vec<f32>) -> Self {
+        Self(vec![value])
+    }
+}
+
+impl From<Vec<Embeddings>> for Embeddings {
+    fn from(value: Vec<Embeddings>) -> Self {
+        Self(
+            value
+                .into_iter()
+                .fold(Vec::<Vec<f32>>::default(), |mut acc, mut nxt| {
+                    acc.append(&mut nxt.0);
+                    acc
+                }),
+        )
+    }
+}
+
 /// Trait for types from which we want to generate embeddings.
 pub trait Normalizable {
     /// Method called by `normalize()` prior to lowercasing and removing
@@ -181,7 +433,7 @@ impl Normalizable for Tag {
 
 /// Container for a mapping of cluster IDs to Cluster Members.
 #[derive(Debug, Clone, PartialEq, IntoIterator, From, Into, Default)]
-struct Clusters(HashMap<ClusterId, Vec<usize>>);
+struct Clusters(BTreeMap<ClusterId, Vec<usize>>);
 impl Clusters {
     /// Associate a member of a feature tensor, identified by (row) index, to a cluster
     /// identified by the given [`ClusterId`]
@@ -195,6 +447,8 @@ impl Clusters {
     Debug,
     Clone,
     PartialEq,
+    PartialOrd,
+    Ord,
     Eq,
     Hash,
     Copy,
@@ -366,7 +620,7 @@ impl std::fmt::Display for ClusteringProduct {
 
 /// Represents a mapping of clusters to the [`Tag`] instances they contain.
 #[derive(Debug, Clone, PartialEq, IntoIterator, From, Into, Default, Serialize, Deserialize)]
-pub struct TagClusters(HashMap<ClusterId, Tags>);
+pub struct TagClusters(BTreeMap<ClusterId, Tags>);
 
 impl From<(Tags, Clusters)> for TagClusters {
     fn from(value: (Tags, Clusters)) -> Self {
