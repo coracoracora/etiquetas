@@ -94,6 +94,7 @@ fn try_save_embeddings<'a>(
     let writer = File::options()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&path)
         .with_context(|| "try_save_embeddings(): open for write")
         .map_err(|e| {
@@ -101,7 +102,7 @@ fn try_save_embeddings<'a>(
                 embeddings.tag.clone(),
                 embeddings.model,
                 Some(path.clone()),
-                e.into(),
+                e,
             )
         })?;
 
@@ -112,7 +113,7 @@ fn try_save_embeddings<'a>(
                 embeddings.tag.clone(),
                 embeddings.model,
                 Some(path.clone()),
-                e.into(),
+                e,
             )
         })?;
 
@@ -126,16 +127,16 @@ fn try_load_embeddings<'a>(
 ) -> std::result::Result<TagEmbeddings, EmbeddingsError<'a>> {
     let path = make_embeddings_cache_path(tag, model)
         .with_context(|| "try_load_embeddings: make cache path")
-        .map_err(|e| EmbeddingsError::Load(tag, model, e.into()))?
+        .map_err(|e| EmbeddingsError::Load(tag, model, e))?
         .with_extension("cbor");
 
     let content = fs::read(&path)
         .with_context(|| "try_load_embeddings(): read data")
-        .map_err(|e| EmbeddingsError::Load(tag, model, e.into()))?;
+        .map_err(|e| EmbeddingsError::Load(tag, model, e))?;
 
     ciborium::from_reader(content.as_slice())
         .with_context(|| "try_load_embeddings(): decode cbor")
-        .map_err(|e| EmbeddingsError::Load(tag, model, e.into()))
+        .map_err(|e| EmbeddingsError::Load(tag, model, e))
 }
 
 /// Given a collection of tags, a model, and a device, attempt to load the embeddings from cache,
@@ -189,18 +190,17 @@ pub fn load_or_generate_embeddings<'a>(
     // For each of these that failed, try to generate embeddings
     .map(|em| {
         zip(tags_to_generate, em)
-            .into_iter()
             .map(|p| TagEmbeddings {
                 tag: p.0.to_owned(),
-                model: model,
+                model,
                 embeddings: p.1.into(),
             })
-            .map(|t| try_save_embeddings(t))
+            .map(try_save_embeddings)
             .partition(|e| e.is_ok())
     })?;
 
     match (generated_embeddings, errors) {
-        (_, e) if e.len() > 0 => Err(EmbeddingsError::LoadOrGenerate(Box::new(
+        (_, e) if !e.is_empty() => Err(EmbeddingsError::LoadOrGenerate(Box::new(
             e.into_iter().filter_map(|f| f.err()).collect(),
         ))),
         (emb, _) => Ok(cached_embeddings
@@ -261,8 +261,7 @@ pub fn embed_and_cluster_tags(
     // let embeddings = generate_embeddings(&normalized_tags, device, model_type)
     //     .with_context(|| "embed_and_cluster_tags()")?;
     let embeddings = load_or_generate_embeddings(tags, model_type, device)
-        .with_context(|| "embed_and_cluster_tags()")
-        .map_err(|e| anyhow::Error::from(e))?;
+        .with_context(|| "embed_and_cluster_tags()")?;
     let clusters = cluster_tag_embeddings(embeddings, min_tags_per_cluster, tolerance)
         .with_context(|| "embed_and_cluster_tags()")?;
 
@@ -271,7 +270,7 @@ pub fn embed_and_cluster_tags(
             cluster_algorithm: ClusterAlgorithmProvenance::Dbscan(min_tags_per_cluster, tolerance),
             embeddings_model: EmbeddingsProvenance::SentenceEmbeddings(model_type),
         },
-        clusters: clusters,
+        clusters,
     };
     Ok(result)
 }
