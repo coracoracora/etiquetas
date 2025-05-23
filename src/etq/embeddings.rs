@@ -8,7 +8,7 @@ use ndarray::prelude::*;
 use rust_bert::pipelines::sentence_embeddings;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     iter::zip,
     path::PathBuf,
@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use anyhow::{Result, anyhow};
 
-use crate::config;
+use crate::{config, display::viz::plot_distance_hist};
 
 use super::model::{Tag, Tags};
 
@@ -173,8 +173,6 @@ pub fn load_or_generate_embeddings<'a>(
         })
         .collect::<Vec<_>>();
 
-    println!("tags_to_generate: {:#?}", tags_to_generate);
-
     // Attempt to generate and save embeddings. The generation happens
     // all at once, so it's all-or nothing. However we still save
     // one-by-one, which means that we need to first see if we have
@@ -198,6 +196,9 @@ pub fn load_or_generate_embeddings<'a>(
             .map(try_save_embeddings)
             .partition(|e| e.is_ok())
     })?;
+
+    // Now, if we have even one error, return an Err that contains _all_ of the errors.
+    // Otherwise, return the successes.
 
     match (generated_embeddings, errors) {
         (_, e) if !e.is_empty() => Err(EmbeddingsError::LoadOrGenerate(Box::new(
@@ -233,12 +234,12 @@ where
         let model = sentence_embeddings::SentenceEmbeddingsBuilder::remote(model_type.into())
             .with_device(device)
             .create_model()
-            .expect("Failed to load embedding model");
+            .expect("generate_embeddings(): Failed to load embedding model");
 
         model
             .encode(tags)
             .map(|e| e.into())
-            .with_context(|| "generate_embedding()/encode")
+            .with_context(|| "generate_embedding(): encode")
             .map_err(|e| e.into())
     }
 }
@@ -261,9 +262,9 @@ pub fn embed_and_cluster_tags(
     // let embeddings = generate_embeddings(&normalized_tags, device, model_type)
     //     .with_context(|| "embed_and_cluster_tags()")?;
     let embeddings = load_or_generate_embeddings(tags, model_type, device)
-        .with_context(|| "embed_and_cluster_tags()")?;
+        .with_context(|| "embed_and_cluster_tags(): load_or_generate")?;
     let clusters = cluster_tag_embeddings(embeddings, min_tags_per_cluster, tolerance)
-        .with_context(|| "embed_and_cluster_tags()")?;
+        .with_context(|| "embed_and_cluster_tags(): cluster")?;
 
     let result = ClusteringProduct {
         provenance: ClusterProvenance {
@@ -299,14 +300,32 @@ fn cluster_embeddings(
     min_points: ClusterSize,
     tolerance: DbscanEpsilon,
 ) -> Result<Clusters> {
+    let distances = embeddings
+        .compute_pairwise_distances()
+        .with_context(|| "cluster_embeddings(): compute_pairwise_distances")?;
+
+    plot_distance_hist(
+        &distances,
+        "plot.png".into(),
+        1600,
+        800,
+        format!(
+            "Pairwise Distances of {} Embeddings",
+            embeddings.shape().0.0
+        )
+        .as_ref(),
+        None,
+    )
+    .with_context(|| "cluster_embeddings(): plot_distance_hist")?;
+
     let reshaped_embeddings = embeddings
         .as_ndarray()
-        .with_context(|| "cluster_embeddings()")?;
+        .with_context(|| "cluster_embeddings(): reshape")?;
 
     let cluster_assignments = Dbscan::params(min_points.into())
         .tolerance(tolerance.into())
         .transform(&reshaped_embeddings)
-        .with_context(|| "cluster_embeddings()")?;
+        .with_context(|| "cluster_embeddings(): transform")?;
 
     let mut clusters = Clusters::default();
     for (point_idx, cluster_id) in cluster_assignments.iter().enumerate() {
@@ -379,8 +398,10 @@ impl Embeddings {
         let mut distances = Array2::zeros((n, n));
         for i in 0..n {
             for j in 0..n {
-                let diff = &embeddings.row(i) - &embeddings.row(j);
-                distances[[i, j]] = diff.dot(&diff).sqrt();
+                if j != i {
+                    let diff = &embeddings.row(i) - &embeddings.row(j);
+                    distances[[i, j]] = diff.dot(&diff).sqrt();
+                }
             }
         }
         Ok(distances)
@@ -617,6 +638,18 @@ impl std::fmt::Display for ClusteringProduct {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, From, Into, Default, Serialize, Deserialize, IntoIterator)]
+pub struct TagCluster {
+    #[into_iterator]
+    members: HashSet<Tag>,
+}
+
+// impl TagCluster {
+//     fn centroid(&self) -> Option<Tag> {
+//         None
+//     }
+// }
+
 /// Represents a mapping of clusters to the [`Tag`] instances they contain.
 #[derive(Debug, Clone, PartialEq, IntoIterator, From, Into, Default, Serialize, Deserialize)]
 pub struct TagClusters(BTreeMap<ClusterId, Tags>);
@@ -688,8 +721,8 @@ impl TagClusters {
         self.0
             .keys()
             .filter(|k| !k.is_noise())
-            .filter_map(|k| self.0.get(k))
-            .count()
+            .filter_map(|k| self.0.get(k).map(|v| v.len()))
+            .sum()
     }
 
     /// Proportion of signal tags to tag population.
